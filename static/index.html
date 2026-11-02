@@ -101,6 +101,7 @@ select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size
     <button data-tab="shelf">书架</button>
     <button data-tab="square">广场</button>
     <button data-tab="chat">问收藏</button>
+    <button data-tab="ext">插件</button>
   </nav><span class="badge" id="userBadge" style="display:none"></span>
 </header>
 <main>
@@ -141,6 +142,25 @@ select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size
       <span class="hint">推荐语写一句理由，全年级都能看到</span>
     </div>
     <div class="grid" id="squareGrid"></div>
+  </div>
+
+  <div id="tab-ext" style="display:none">
+    <div class="section">浏览器插件 · 一键收藏任意网页</div>
+    <div class="pastebox" style="margin-top:10px">
+      <p style="font-size:14px;line-height:1.9">
+        装上插件后，在<b>任何网页</b>点一下浏览器工具栏的拾页图标，当前页面即刻收进你的收藏夹，AI 自动生成导读与标签，无需复制粘贴。
+      </p>
+      <a class="btn" href="/extension.zip" download style="display:inline-block;margin:6px 0 16px">⬇️ 下载插件压缩包</a>
+      <div class="section" style="font-size:14px;margin:0 0 6px">安装步骤（Chrome / Edge 通用，约 1 分钟）</div>
+      <ol style="font-size:14px;line-height:2;padding-left:22px;color:#3a3a3c;margin:0">
+        <li>下载并解压上面的压缩包，得到一个 <b>extension</b> 文件夹</li>
+        <li>Chrome 地址栏输入 <b>chrome://extensions</b>（Edge 输入 <b>edge://extensions</b>）</li>
+        <li>打开 <b>「开发者模式」</b>（Chrome 在右上角，Edge 在左侧栏）</li>
+        <li>点 <b>「加载已解压的扩展程序」</b>，选中刚解压的 extension 文件夹</li>
+        <li>浏览器工具栏出现拾页图标 → 点击图标<b>登录你的拾页账号</b> → 之后任意网页一键收藏</li>
+      </ol>
+      <p class="hint" style="margin-top:12px">· 手机浏览器暂不支持浏览器插件，手机上用网页端粘贴收藏即可<br>· 插件与网页登录的是同一账号，收藏内容实时同步</p>
+    </div>
   </div>
 
   <div id="tab-chat" style="display:none">
@@ -196,7 +216,7 @@ async function refresh(){
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x=>x.classList.remove('on'));
   b.classList.add('on');
-  for (const t of ['inbox','shelf','square','chat']) $('tab-'+t).style.display = b.dataset.tab===t ? '' : 'none';
+  for (const t of ['inbox','shelf','square','chat','ext']) $('tab-'+t).style.display = b.dataset.tab===t ? '' : 'none';
 });
 
 // ---------- save ----------
@@ -443,6 +463,7 @@ boot();
 </script>
 </body>
 </html>
+
 
 
 
