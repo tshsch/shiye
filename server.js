@@ -72,7 +72,23 @@ async function llm(messages, jsonMode) {
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(60000)
   });
-  if (!r.ok) throw new Error('LLM ' + r.status + ': ' + (await r.text()).slice(0, 300));
+  if (!r.ok) {
+    const t = await r.text();
+    // 部分平台不支持 response_format，去掉后重试一次
+    if (jsonMode && (r.status === 400 || r.status === 404)) {
+      const retry = await fetch(LLM_BASE + '/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + LLM_KEY },
+        body: JSON.stringify({ model: LLM_MODEL, messages, temperature: 0.4 }),
+        signal: AbortSignal.timeout(60000)
+      });
+      if (retry.ok) {
+        const d2 = await retry.json();
+        return d2.choices[0].message.content;
+      }
+    }
+    throw new Error('LLM ' + r.status + ': ' + t.slice(0, 300));
+  }
   const data = await r.json();
   return data.choices[0].message.content;
 }
@@ -389,5 +405,6 @@ server.listen(PORT, () => {
   console.log('  AI 能力: ' + (LLM_KEY ? '已连接 (' + LLM_MODEL + ')' : '未配置 key，运行在演示模式'));
   console.log('');
 });
+
 
 
