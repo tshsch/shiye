@@ -299,7 +299,13 @@ async function handleApi(req, res, pathname, query) {
     // 评论跨用户展示（条目自己的评论 + 书籍讨论聚合在前端做）
     const mine = items.map(i => i.id);
     const comments = mine.length ? db.prepare('SELECT * FROM comments WHERE item_id IN (' + mine.map(() => '?').join(',') + ') ORDER BY id').all(...mine) : [];
-    return json(res, 200, { folders, books, items, comments, llm: !!LLM_KEY, username: (db.prepare('SELECT username FROM users WHERE id=?').get(me) || {}).username });
+    const square = db.prepare(`SELECT i.id, i.title, i.one_sentence, i.minutes, i.recommend_note, i.author_name, i.user_id,
+      u.username AS owner, f.name AS folder_name,
+      (SELECT COUNT(*) FROM comments c WHERE c.item_id = i.id) AS comment_count
+      FROM items i LEFT JOIN folders f ON f.id = i.folder_id LEFT JOIN users u ON u.id = i.user_id
+      WHERE f.is_public = 1 OR (i.recommend_note IS NOT NULL AND i.recommend_note != '')
+      ORDER BY i.id DESC LIMIT 50`).all();
+    return json(res, 200, { folders, books, items, comments, square, llm: !!LLM_KEY, username: (db.prepare('SELECT username FROM users WHERE id=?').get(me) || {}).username });
   }
 
   if (method === 'POST' && pathname === '/api/folders') {
@@ -461,6 +467,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('  演示账号: demo / demo123');
   console.log('');
 });
+
 
 
 

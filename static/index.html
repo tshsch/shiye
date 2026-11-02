@@ -318,19 +318,17 @@ function openBook(id){
 // ---------- square ----------
 function renderSquare(){
   const g = $('squareGrid');
-  const pubs = S.items.filter(i=>{
-    const f = S.folders.find(x=>x.id===i.folder_id);
-    return (f && f.is_public) || i.recommend_note;
-  });
+  const pubs = S.square || [];
   g.innerHTML = pubs.length ? '' : '<div class="empty" style="grid-column:1/-1">广场还很安静，把一个收藏夹设为公开试试</div>';
   for (const it of pubs){
+    const mine = S.items.some(x=>x.id===it.id);
     const card = document.createElement('div'); card.className='card';
     card.onclick = ()=>openItem(it.id);
     card.innerHTML = `
-      <div class="reco">💬 ${esc(it.author_name||'同学')}：${esc(it.recommend_note||'觉得不错，分享给大家')}</div>
+      <div class="reco">💬 ${esc(it.author_name||it.owner||'同学')}：${esc(it.recommend_note||'觉得不错，分享给大家')}</div>
       <h3>${esc(it.title)}</h3>
       <div class="one">${esc(it.one_sentence)}</div>
-      <div class="meta"><span>💬 ${S.comments.filter(c=>c.item_id===it.id).length} 条讨论</span><span>约 ${it.minutes} 分钟</span></div>`;
+      <div class="meta"><span>👤 ${esc(it.owner||'同学')}${mine?'（你）':''}</span><span>💬 ${it.comment_count||0} 条讨论</span><span>约 ${it.minutes} 分钟</span></div>`;
     g.appendChild(card);
   }
 }
@@ -388,6 +386,7 @@ boot();
 </script>
 </body>
 </html>
+
 
 
 
