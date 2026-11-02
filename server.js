@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS items(
 CREATE TABLE IF NOT EXISTS chunks(
   id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
   idx INTEGER NOT NULL, text TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tokens(
+  token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS comments(
   id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
   user_id INTEGER, user_name TEXT NOT NULL, text TEXT NOT NULL,
@@ -73,7 +75,12 @@ function parseCookies(req) {
 }
 function currentUser(req) {
   const token = parseCookies(req).shiy_token;
-  return token && sessions.has(token) ? sessions.get(token) : null;
+  if (!token) return null;
+  if (sessions.has(token)) return sessions.get(token);
+  const row = db.prepare('SELECT user_id, expires_at FROM tokens WHERE token=?').get(token);
+  if (!row || row.expires_at < Date.now()) { if (row) db.prepare('DELETE FROM tokens WHERE token=?').run(token); return null; }
+  sessions.set(token, row.user_id);
+  return row.user_id;
 }
 function hash(salt, pw) { return crypto.createHash('sha256').update(salt + '::' + pw).digest('hex'); }
 
@@ -254,8 +261,10 @@ async function handleApi(req, res, pathname, query) {
   const method = req.method;
   const setAuth = (res, userId) => {
     const token = crypto.randomBytes(24).toString('hex');
+    const expires = Date.now() + 30 * 24 * 3600 * 1000;
     sessions.set(token, userId);
-    return { 'Set-Cookie': 'shiy_token=' + token + '; Path=/; HttpOnly; SameSite=Lax' };
+    db.prepare('INSERT INTO tokens(token,user_id,expires_at) VALUES(?,?,?)').run(token, userId, expires);
+    return { 'Set-Cookie': 'shiy_token=' + token + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000' };
   };
 
   if (method === 'GET' && pathname === '/api/health') return json(res, 200, { ok: true, llm: !!LLM_KEY, model: LLM_MODEL });
@@ -281,7 +290,7 @@ async function handleApi(req, res, pathname, query) {
   }
   if (method === 'POST' && pathname === '/api/logout') {
     const token = parseCookies(req).shiy_token;
-    if (token) sessions.delete(token);
+    if (token) { sessions.delete(token); db.prepare('DELETE FROM tokens WHERE token=?').run(token); }
     return json(res, 200, { ok: true }, { 'Set-Cookie': 'shiy_token=; Path=/; Max-Age=0' });
   }
 
@@ -467,6 +476,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('  演示账号: demo / demo123');
   console.log('');
 });
+
 
 
 
