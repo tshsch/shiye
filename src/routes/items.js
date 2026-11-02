@@ -2,7 +2,7 @@ const db = require('../db');
 const { json, readBody } = require('../lib/http');
 const { LLM_KEY } = require('../config');
 const { llm, analyzePrompt, fallbackAnalyze } = require('../llm');
-const { extractFromUrl, chunkText, commentsFor } = require('../content');
+const { extractFromUrl, cleanArticleText, chunkText, commentsFor } = require('../content');
 
 function itemRow(r) {
   return { ...r, tags: JSON.parse(r.tags || '[]') };
@@ -23,7 +23,7 @@ module.exports = async function itemRoutes(req, res, ctx) {
           const ext = await extractFromUrl(url);
           if (ext.text && ext.text.length >= 200) { title = ext.title || title; text = ext.text; }
         } catch (e) { /* 服务器抓取失败时回退到客户端带来的正文 */ }
-        if (!text && b.text && b.text.trim().length > 30) text = b.text.trim().slice(0, 16000);
+        if (!text && b.text && b.text.trim().length > 30) text = cleanArticleText(b.text).slice(0, 16000) || b.text.trim().slice(0, 16000);
         if (!text) return json(res, 422, { error: '该网页抓取失败（可能有登录墙），请去主页手动粘贴正文' }), true;
       } else if (b.text && b.text.trim().length > 30) {
         text = b.text.trim().slice(0, 16000);

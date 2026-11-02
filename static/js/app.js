@@ -73,7 +73,7 @@ function renderItems() {
     const card = document.createElement('div'); card.className = 'card';
     card.onclick = () => openItem(it.id);
     card.innerHTML = `
-      <div class="del" onclick="event.stopPropagation();delItem(${it.id})">×</div>
+      <div class="del" onclick="event.stopPropagation();delClick(this, ${it.id})">×</div>
       <h3>${esc(it.title)}</h3>
       <div class="one">${esc(it.one_sentence)}</div>
       <div class="tags">${it.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
@@ -83,7 +83,15 @@ function renderItems() {
   }
 }
 
-async function delItem(id) { if (!confirm('删除这条收藏？')) return; await api('items/' + id, 'DELETE'); refresh(); }
+async function delItem(id) { await api('items/' + id, 'DELETE'); refresh(); toast('已删除'); }
+// 两段式删除：第一次点击变为“确认删除”，再点才真正删除（避免浏览器拦截 confirm 导致静默失效）
+function delClick(el, id) {
+  if (el.dataset.armed) { el.dataset.armed = ''; delItem(id); return; }
+  el.dataset.armed = '1';
+  el.textContent = '确认删除';
+  el.classList.add('sure');
+  setTimeout(() => { el.dataset.armed = ''; el.textContent = '×'; el.classList.remove('sure'); }, 2500);
+}
 
 // ---------- 详情弹窗（自己的内容可管理，广场上他人的内容只读+评论） ----------
 async function openItem(id) {
@@ -253,9 +261,26 @@ async function sendChat() {
   log.scrollTop = log.scrollHeight;
   try {
     const d = await api('chat', 'POST', { question: q });
-    $('pending').outerHTML = `<div class="bubble ai">${esc(d.answer)}${d.sources.length ? '<div class="src">引用：' + d.sources.map(s => `[${s.n}] ${esc(s.title)}`).join(' · ') + '</div>' : ''}</div>`;
+    const srcHtml = (d.sources || []).map(s => `
+      <div class="srcCard" id="src-${s.n}" onclick="openItem(${s.item_id})" title="点击打开原文">
+        <b>[${s.n}] ${esc(s.title)}</b>
+        <div class="snippet">${esc(s.snippet)}……</div>
+      </div>`).join('');
+    $('pending').outerHTML = `<div class="bubble ai">${renderAnswer(d.answer)}${srcHtml ? '<div class="srcList">' + srcHtml + '</div>' : ''}</div>`;
   } catch (e) { $('pending').outerHTML = `<div class="bubble ai">出错了：${esc(e.message)}</div>`; }
   log.scrollTop = log.scrollHeight;
+}
+
+// 引用编号渲染为可点击徽章，点击滚动到对应引用卡片
+function renderAnswer(text) {
+  return esc(text).replace(/\[(\d{1,2})\]/g, (m, n) => `<sup class="cite" onclick="jumpSource(${n})" title="查看引用来源">${n}</sup>`);
+}
+function jumpSource(n) {
+  const el = $('src-' + n);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.add('flash');
+  setTimeout(() => el.classList.remove('flash'), 1200);
 }
 
 // ---------- 个人主页 ----------
