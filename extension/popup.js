@@ -46,7 +46,7 @@ $("save").onclick = async () => {
     const r = await fetch(API + "/items", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: page.url, text: page.text, folder_id: $("folder").value ? Number($("folder").value) : null })
+      body: JSON.stringify({ url: page.url, title: page.title, text: page.text, folder_id: $("folder").value ? Number($("folder").value) : null })
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || "收藏失败");
@@ -64,3 +64,4 @@ $("save").onclick = async () => {
 
 function esc(s) { return String(s || "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 init();
+

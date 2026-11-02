@@ -260,13 +260,16 @@ async function handleApi(req, res, pathname, query) {
 
   if (method === 'POST' && pathname === '/api/items') {
     const b = await readBody(req);
-    let title = '', text = '', url = '';
+    let title = b.title || '', text = '', url = '';
     try {
       if (b.url && /^https?:\/\//.test(b.url)) {
         url = b.url;
-        const ext = await extractFromUrl(url);
-        title = ext.title; text = ext.text;
-        if (text.length < 200) throw new Error('该网页正文太少（可能有登录墙），请改用粘贴正文');
+        try {
+          const ext = await extractFromUrl(url);
+          if (ext.text && ext.text.length >= 200) { title = ext.title; text = ext.text; }
+        } catch (e) { /* 服务器抓取失败时回退到客户端带来的正文 */ }
+        if (!text && b.text && b.text.trim().length > 30) text = b.text.trim().slice(0, 16000);
+        if (!text) return json(res, 422, { error: '该网页抓取失败（可能有登录墙），请去主页手动粘贴正文' });
       } else if (b.text && b.text.trim().length > 30) {
         text = b.text.trim().slice(0, 16000);
       } else {
@@ -382,3 +385,4 @@ server.listen(PORT, () => {
   console.log('  AI 能力: ' + (LLM_KEY ? '已连接 (' + LLM_MODEL + ')' : '未配置 key，运行在演示模式'));
   console.log('');
 });
+
