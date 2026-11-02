@@ -389,7 +389,9 @@ async function handleApi(req, res, pathname, query) {
     }
     if (!allowed) return json(res, 403, { error: '该内容未公开，无法查看' });
     const comments = db.prepare('SELECT * FROM comments WHERE item_id=? ORDER BY id').all(item.id);
-    return json(res, 200, { item: itemRow(item), comments });
+    const owner = db.prepare('SELECT username FROM users WHERE id=?').get(item.user_id);
+    const out = itemRow(item); out.owner_name = owner ? owner.username : '同学';
+    return json(res, 200, { item: out, comments });
   }
   if (method === 'PATCH' && im) {
     const b = await readBody(req);
@@ -489,6 +491,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('  演示账号: demo / demo123');
   console.log('');
 });
+
 
 
 
