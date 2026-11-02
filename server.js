@@ -106,10 +106,14 @@ function analyzePrompt(title, text) {
 }
 function fallbackAnalyze(title, text) {
   const clean = text.replace(/\s+/g, ' ').trim();
+  const sents = clean.split(/(?<=[。！？!?])/).map(s => s.trim()).filter(Boolean);
+  let sum = '';
+  for (const s of sents) { if ((sum + s).length > 130) break; sum += s; }
+  if (!sum) sum = clean.slice(0, 120);
   return {
-    title: title || clean.slice(0, 30),
-    summary: clean.slice(0, 150) + '……',
-    one_sentence: clean.slice(0, 25),
+    title: title || (sents[0] ? sents[0].slice(0, 28) : clean.slice(0, 28)),
+    summary: sum,
+    one_sentence: (sents[0] || clean).slice(0, 25),
     minutes: Math.max(1, Math.round(text.length / 500)),
     tags: ['待整理']
   };
@@ -385,4 +389,5 @@ server.listen(PORT, () => {
   console.log('  AI 能力: ' + (LLM_KEY ? '已连接 (' + LLM_MODEL + ')' : '未配置 key，运行在演示模式'));
   console.log('');
 });
+
 
