@@ -50,6 +50,10 @@ CREATE TABLE IF NOT EXISTS chunks(
   idx INTEGER NOT NULL, text TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tokens(
   token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS comment_likes(
+  comment_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(comment_id,user_id));
+CREATE TABLE IF NOT EXISTS comment_favs(
+  comment_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY(comment_id,user_id));
 CREATE TABLE IF NOT EXISTS comments(
   id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
   user_id INTEGER, user_name TEXT NOT NULL, text TEXT NOT NULL,
@@ -61,6 +65,9 @@ for (const t of ['items', 'folders', 'books']) {
   try { db.exec('ALTER TABLE ' + t + ' ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1'); } catch (e) {}
 }
 try { db.exec('ALTER TABLE comments ADD COLUMN user_id INTEGER'); } catch (e) {}
+try { db.exec("ALTER TABLE users ADD COLUMN nickname TEXT DEFAULT ''"); } catch (e) {}
+try { db.exec("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''"); } catch (e) {}
+try { db.exec("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ''"); } catch (e) {}
 db.exec('CREATE INDEX IF NOT EXISTS idx_items_user ON items(user_id); CREATE INDEX IF NOT EXISTS idx_chunks_item ON chunks(item_id);');
 
 // ---------- sessions ----------
@@ -194,6 +201,16 @@ function retrieve(question, userId, k = 6) {
   return scored.filter(r => { const key = r.item_id + ':' + r.idx; if (seen.has(key)) return false; seen.add(key); return true; });
 }
 
+function commentsFor(itemId, me) {
+  return db.prepare(`SELECT c.*,
+    COALESCE(NULLIF(u.nickname,''), u.username, c.user_name) AS user_name,
+    u.avatar AS user_avatar,
+    (SELECT COUNT(*) FROM comment_likes cl WHERE cl.comment_id=c.id) AS like_count,
+    EXISTS(SELECT 1 FROM comment_likes cl WHERE cl.comment_id=c.id AND cl.user_id=?) AS liked_by_me,
+    EXISTS(SELECT 1 FROM comment_favs cf WHERE cf.comment_id=c.id AND cf.user_id=?) AS faved_by_me
+    FROM comments c LEFT JOIN users u ON u.id=c.user_id WHERE c.item_id=? ORDER BY c.id`).all(me, me, itemId);
+}
+
 // ---------- seed（演示账号） ----------
 function seedDemo() {
   let demo = db.prepare('SELECT id FROM users WHERE username=?').get('demo');
@@ -297,8 +314,8 @@ async function handleApi(req, res, pathname, query) {
   const me = currentUser(req);
   if (!me) return json(res, 401, { error: '请先登录' });
   if (method === 'GET' && pathname === '/api/me') {
-    const u = db.prepare('SELECT username FROM users WHERE id=?').get(me);
-    return json(res, 200, { username: u ? u.username : '同学' });
+    const u = db.prepare('SELECT username, nickname, bio, avatar FROM users WHERE id=?').get(me);
+    return json(res, 200, u ? { username: u.username, nickname: u.nickname || '', bio: u.bio || '', avatar: u.avatar || '' } : { username: '同学', nickname: '', bio: '', avatar: '' });
   }
 
   if (method === 'GET' && pathname === '/api/state') {
@@ -307,11 +324,12 @@ async function handleApi(req, res, pathname, query) {
     const items = db.prepare('SELECT * FROM items WHERE user_id=? ORDER BY id DESC').all(me).map(itemRow);
     // 评论跨用户展示（条目自己的评论 + 书籍讨论聚合在前端做）
     const mine = items.map(i => i.id);
-    const comments = mine.length ? db.prepare('SELECT * FROM comments WHERE item_id IN (' + mine.map(() => '?').join(',') + ') ORDER BY id').all(...mine) : [];
+    let comments = [];
+    for (const iid of mine) comments = comments.concat(commentsFor(iid, me));
     const square = db.prepare(`SELECT i.id, i.title, i.one_sentence, i.minutes, i.recommend_note, i.author_name, i.user_id,
       u.username AS owner, f.name AS folder_name,
       (SELECT COUNT(*) FROM comments c WHERE c.item_id = i.id) AS comment_count,
-      (SELECT c.user_name || '：' || c.text FROM comments c WHERE c.item_id = i.id ORDER BY c.id DESC LIMIT 1) AS hot_comment
+      (SELECT COALESCE(NULLIF(u2.nickname,''), u2.username, c.user_name) || '：' || c.text FROM comments c LEFT JOIN users u2 ON u2.id = c.user_id WHERE c.item_id = i.id ORDER BY (SELECT COUNT(*) FROM comment_likes cl WHERE cl.comment_id = c.id) DESC, c.id DESC LIMIT 1) AS hot_comment
       FROM items i LEFT JOIN folders f ON f.id = i.folder_id LEFT JOIN users u ON u.id = i.user_id
       WHERE f.is_public = 1 OR (i.recommend_note IS NOT NULL AND i.recommend_note != '')
       ORDER BY i.id DESC LIMIT 50`).all();
@@ -388,8 +406,8 @@ async function handleApi(req, res, pathname, query) {
       allowed = (f && f.is_public === 1) || (item.recommend_note && item.recommend_note !== '');
     }
     if (!allowed) return json(res, 403, { error: '该内容未公开，无法查看' });
-    const comments = db.prepare('SELECT * FROM comments WHERE item_id=? ORDER BY id').all(item.id);
-    const owner = db.prepare('SELECT username FROM users WHERE id=?').get(item.user_id);
+    const comments = commentsFor(item.id, me);
+    const owner = db.prepare('SELECT username, nickname, avatar FROM users WHERE id=?').get(item.user_id);
     const out = itemRow(item); out.owner_name = owner ? owner.username : '同学';
     return json(res, 200, { item: out, comments });
   }
@@ -422,6 +440,40 @@ async function handleApi(req, res, pathname, query) {
     const id = db.prepare('INSERT INTO comments(item_id,user_id,user_name,text) VALUES(?,?,?,?)')
       .run(Number(b.item_id), me, String(b.user_name || (u ? u.username : '同学')).slice(0, 20), String(b.text).slice(0, 300)).lastInsertRowid;
     return json(res, 200, { id });
+  }
+
+  if (method === 'PATCH' && pathname === '/api/profile') {
+    const b = await readBody(req);
+    const u = db.prepare('SELECT * FROM users WHERE id=?').get(me);
+    const nickname = 'nickname' in b ? String(b.nickname || '').trim().slice(0, 20) : (u.nickname || '');
+    const bio = 'bio' in b ? String(b.bio || '').slice(0, 300) : (u.bio || '');
+    let avatar = u.avatar || '';
+    if ('avatar' in b) {
+      const a = String(b.avatar || '');
+      if (a && !/^data:image\/(png|jpe?g|gif|webp);base64,/.test(a)) return json(res, 400, { error: '头像仅支持图片文件' });
+      if (a.length > 300000) return json(res, 400, { error: '头像图片太大，请换一张小图' });
+      avatar = a;
+    }
+    db.prepare('UPDATE users SET nickname=?, bio=?, avatar=? WHERE id=?').run(nickname, bio, avatar, me);
+    return json(res, 200, { ok: true });
+  }
+  if (method === 'GET' && pathname === '/api/fav-comments') {
+    const rows = db.prepare(`SELECT c.*, i.title AS item_title, i.id AS item_id,
+      COALESCE(NULLIF(u.nickname,''), u.username, c.user_name) AS user_name, u.avatar AS user_avatar,
+      (SELECT COUNT(*) FROM comment_likes cl WHERE cl.comment_id=c.id) AS like_count,
+      EXISTS(SELECT 1 FROM comment_likes cl WHERE cl.comment_id=c.id AND cl.user_id=?) AS liked_by_me
+      FROM comment_favs cf JOIN comments c ON c.id=cf.comment_id JOIN items i ON i.id=c.item_id
+      LEFT JOIN users u ON u.id=c.user_id WHERE cf.user_id=? ORDER BY cf.rowid DESC`).all(me, me);
+    return json(res, 200, { comments: rows });
+  }
+  const cm = pathname.match(/^\/api\/comments\/(\d+)\/(like|fav)$/);
+  if (method === 'POST' && cm) {
+    const cid = Number(cm[1]), kind = cm[2] === 'like' ? 'comment_likes' : 'comment_favs';
+    const exists = db.prepare('SELECT 1 FROM ' + kind + ' WHERE comment_id=? AND user_id=?').get(cid, me);
+    if (exists) db.prepare('DELETE FROM ' + kind + ' WHERE comment_id=? AND user_id=?').run(cid, me);
+    else db.prepare('INSERT INTO ' + kind + ' (comment_id,user_id) VALUES(?,?)').run(cid, me);
+    const cnt = db.prepare('SELECT COUNT(*) AS n FROM ' + kind + ' WHERE comment_id=?').get(cid).n;
+    return json(res, 200, { active: !exists, count: cnt });
   }
 
   if (method === 'POST' && pathname === '/api/chat') {
@@ -491,6 +543,8 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('  演示账号: demo / demo123');
   console.log('');
 });
+
+
 
 
 

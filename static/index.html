@@ -87,6 +87,11 @@ select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size
 .bubble{animation:pop .2s ease}
 .note{font-size:13px;color:var(--green);background:#f0fdfa;border:1px solid #99f6e4;border-radius:10px;padding:10px 14px;margin-top:12px;display:none}
 .hotc{font-size:12px;color:#b45309;background:#fffbeb;border-radius:8px;padding:6px 10px}\n.reco{font-size:12px;color:var(--green);background:#f0fdfa;border-radius:8px;padding:6px 10px}
+.cact{margin-top:6px;display:flex;gap:12px}
+.cbtn{cursor:pointer;font-size:12px;color:var(--sub);user-select:none}
+.cbtn.on{color:var(--accent);font-weight:700}
+.cava{width:20px;height:20px;border-radius:50%;vertical-align:-5px;margin-right:6px;object-fit:cover}
+.clamp3{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .recoBtn{color:var(--accent);cursor:pointer;font-weight:600;user-select:none}
 .recoBtn:hover{text-decoration:underline}
 .del{position:absolute;top:10px;right:12px;color:#ccc;font-size:15px;cursor:pointer}.del:hover{color:#ef4444}
@@ -309,7 +314,7 @@ async function openItem(id){
     </div>`;
     noteHtml = `
     <div class="selrow" style="margin:-4px 0 14px">
-      💬 <input id="mNote" placeholder="推荐到广场的理由（选填，写了就上广场）" value="${esc(it.recommend_note)}" style="flex:1;border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px">
+      💬 <textarea id="mNote" rows="3" placeholder="推荐到广场的理由（选填，写了就上广场，支持长文）" style="flex:1;border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px;font-family:inherit;resize:vertical">${esc(it.recommend_note)}</textarea>
     </div>`;
   } else {
     selectorHtml = `<div class="hint" style="margin:10px 0">👤 来自 <b>${esc(it.owner_name || '同学')}</b> 的收藏</div>`;
@@ -323,10 +328,10 @@ async function openItem(id){
     ${noteHtml}
     <details><summary style="cursor:pointer;font-size:13px;color:var(--sub)">查看正文</summary><div class="content" style="margin-top:10px">${esc(it.content)}</div></details>
     <div class="section" style="font-size:14px;margin:16px 0 4px">评论讨论</div>
-    ${cs.map(c=>`<div class="comment"><b>${esc(c.user_name)}</b><span class="c-sub">${c.created_at}</span><br>${esc(c.text)}</div>`).join('') || '<div class="hint">还没有评论</div>'}
-    <div class="cform">
-      <input id="ctext" placeholder="写点什么…" onkeydown="if(event.key==='Enter')postComment(${id})">
-      <button class="btn small" onclick="postComment(${id})">发送</button>
+    ${cs.map(c=>`<div class="comment"><b>${esc(c.user_name)}</b>${c.user_avatar?`<img class="cava" src="${esc(c.user_avatar)}">`:''}<span class="c-sub">${c.created_at}</span><br>${esc(c.text)}<div class="cact"><span class="cbtn ${c.liked_by_me?'on':''}" onclick="toggleComment(${c.id},'like',${id})">👍 ${c.like_count||0}</span><span class="cbtn ${c.faved_by_me?'on':''}" onclick="toggleComment(${c.id},'fav',${id})">⭐ 收藏</span></div></div>`).join('') || '<div class="hint">还没有评论</div>'}
+    <div class="cform" style="flex-direction:column;align-items:stretch">
+      <textarea id="ctext" rows="2" placeholder="写下你的看法，支持长评（Ctrl+回车发送）…" style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical" onkeydown="if(event.ctrlKey&&event.key==='Enter')postComment(${id})"></textarea>
+      <button class="btn small" onclick="postComment(${id})" style="align-self:flex-end;margin-top:6px">发送</button>
     </div>`;
   $('mask').classList.add('show');
 }
@@ -384,10 +389,20 @@ function renderSquare(){
       <div class="reco">💬 ${esc(it.author_name||it.owner||'同学')}：${esc(it.recommend_note||'觉得不错，分享给大家')}</div>
       <h3>${esc(it.title)}</h3>
       <div class="one">${esc(it.one_sentence)}</div>
-      ${it.hot_comment ? `<div class="hotc">🔥 ${esc(it.hot_comment)}</div>` : ''}
+      ${it.hot_comment ? `<div class="hotc clamp3">🔥 ${esc(it.hot_comment)}</div>` : ''}
       <div class="meta"><span>👤 ${esc(it.owner||'同学')}${mine?'（你）':''}</span><span>💬 ${it.comment_count||0} 条讨论</span><span>约 ${it.minutes} 分钟</span></div>`;
     g.appendChild(card);
   }
+}
+
+async function toggleComment(cid, kind, itemId){
+  try {
+    const r = await api('comments/'+cid+'/'+kind, 'POST');
+    toast(kind==='like' ? (r.active ? '已点赞' : '已取消点赞') : (r.active ? '已收藏该评论' : '已取消收藏'));
+    if (itemId) { await refresh(); openItem(itemId); }
+    else if (kind === 'fav') { loadFavs(); }
+    else if ($('favList')) { loadFavs(); }
+  } catch(e){ toast(e.message); }
 }
 
 // ---------- 推荐到广场 ----------
@@ -398,7 +413,7 @@ function openRecommend(preId){
     <h2>📢 推荐到广场</h2>
     <p class="hint" style="margin:6px 0 12px">选择你的一篇收藏，写一句理由，全年级都能看到并参与讨论。</p>
     <select id="rItem">${opts}</select>
-    <input id="rNote" placeholder="一句话推荐理由（必填）" style="width:100%;border:1px solid var(--line);border-radius:10px;padding:11px 14px;font-size:14px;margin:4px 0 14px">
+    <textarea id="rNote" rows="4" placeholder="写下推荐理由，可以是长评（必填）" style="width:100%;border:1px solid var(--line);border-radius:10px;padding:11px 14px;font-size:14px;font-family:inherit;resize:vertical;margin:4px 0 14px"></textarea>
     <button class="btn" onclick="submitRecommend()">发布到广场</button>`;
   $('mask').classList.add('show');
 }
@@ -456,13 +471,65 @@ $('authGo').onclick = async () => {
   } catch(e){ $('authErr').textContent = e.message; }
 };
 $('authPass').addEventListener('keydown', e => { if(e.key==='Enter') $('authGo').click(); });
-$('userBadge').onclick = async () => {
-  if (confirm('退出登录？')) { await api('logout','POST'); location.reload(); }
-};
+$('userBadge').onclick = () => showProfile();
+async function showProfile(){
+  const me = await api('me');
+  $('modalBody').innerHTML = `
+    <h2>个人主页</h2>
+    <div style="display:flex;gap:16px;align-items:center;margin:14px 0">
+      <img id="pAva" src="${me.avatar||'/favicon.svg'}" style="width:64px;height:64px;border-radius:50%;object-fit:cover;border:1px solid var(--line)">
+      <div style="flex:1">
+        <div style="font-weight:700;font-size:16px">${esc(me.nickname||me.username)}</div>
+        <div class="hint">@${esc(me.username)}</div>
+      </div>
+      <label class="btn small ghost" style="cursor:pointer">换头像<input type="file" id="pAvaFile" accept="image/*" style="display:none" onchange="uploadAvatar(this)"></label>
+    </div>
+    <div style="margin-bottom:10px"><div class="hint" style="margin-bottom:4px">昵称（展示用，不是登录名）</div>
+      <input id="pNick" value="${esc(me.nickname||'')}" placeholder="比如：夜跑爱好者" style="width:100%;border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:14px"></div>
+    <div style="margin-bottom:14px"><div class="hint" style="margin-bottom:4px">个人简介</div>
+      <textarea id="pBio" rows="3" placeholder="介绍一下自己…" style="width:100%;border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:14px;font-family:inherit;resize:vertical">${esc(me.bio||'')}</textarea></div>
+    <button class="btn" onclick="saveProfile()">保存资料</button>
+    <div class="section" style="font-size:14px;margin:18px 0 4px">⭐ 我收藏的评论</div>
+    <div id="favList"><div class="hint">加载中…</div></div>
+    <div style="margin-top:18px;text-align:right"><a style="color:#dc2626;cursor:pointer;font-size:13px" onclick="doLogout()">退出登录</a></div>`;
+  $('mask').classList.add('show');
+  loadFavs();
+}
+async function saveProfile(){
+  try {
+    await api('profile','PATCH',{ nickname: $('pNick').value.trim(), bio: $('pBio').value });
+    toast('资料已保存');
+    const me = await api('me');
+    $('userBadge').textContent = '👤 ' + (me.nickname||me.username);
+  } catch(e){ toast(e.message); }
+}
+async function uploadAvatar(input){
+  const f = input.files[0]; if (!f) return;
+  if (f.size > 200*1024) { toast('图片请小于 200KB，先压缩一下'); return; }
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      await api('profile','PATCH',{ avatar: reader.result });
+      $('pAva').src = reader.result; toast('头像已更新');
+    } catch(e){ toast(e.message); }
+  };
+  reader.readAsDataURL(f);
+}
+async function loadFavs(){
+  try {
+    const d = await api('fav-comments');
+    $('favList').innerHTML = d.comments.length ? d.comments.map(c=>`
+      <div class="comment"><b>${esc(c.user_name)}</b> <span class="c-sub">评《${esc(c.item_title)}》</span><br>${esc(c.text)}
+      <div class="cact"><span class="cbtn ${c.liked_by_me?'on':''}" onclick="toggleComment(${c.id},'like')">👍 ${c.like_count||0}</span><span class="cbtn on" onclick="toggleComment(${c.id},'fav')">⭐ 已收藏</span></div></div>`).join('')
+      : '<div class="hint">还没有收藏过评论。在任意评论下方点 ⭐ 收藏，它就会出现在这里。</div>';
+  } catch(e){ $('favList').innerHTML = '<div class="hint">加载失败</div>'; }
+}
+async function doLogout(){ await api('logout','POST'); location.reload(); }
 boot();
 </script>
 </body>
 </html>
+
 
 
 
