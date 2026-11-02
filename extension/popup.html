@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+body{width:320px;margin:0;font-family:"Microsoft YaHei",system-ui,sans-serif;background:#faf9f6;color:#1c1c1e;padding:14px}
+h1{font-size:16px;margin:0 0 2px}h1 span{color:#4f46e5}
+.sub{font-size:11px;color:#8a8a90;margin-bottom:10px}
+#title{font-size:13px;font-weight:600;line-height:1.4;background:#fff;border:1px solid #e8e6e0;border-radius:8px;padding:8px 10px;margin-bottom:8px;word-break:break-all}
+select{width:100%;border:1px solid #e8e6e0;border-radius:8px;padding:8px 10px;font-size:13px;margin-bottom:8px;background:#fff}
+button{width:100%;border:none;border-radius:10px;padding:11px;font-size:14px;font-weight:600;background:#4f46e5;color:#fff;cursor:pointer}
+button:disabled{opacity:.6}
+#result{display:none;background:#eef2ff;border-radius:10px;padding:10px 12px;margin-top:10px;font-size:12px;line-height:1.6}
+#result b{color:#4f46e5}
+#err{display:none;color:#dc2626;font-size:12px;margin-top:8px}
+.openlink{display:block;text-align:center;font-size:12px;color:#4f46e5;margin-top:10px;text-decoration:none}
+</style>
+</head>
+<body>
+<h1>拾<span>页</span> · 收藏助手</h1>
+<div class="sub">把这页收进你的阅读知识库</div>
+<div id="title">读取页面中…</div>
+<select id="folder"><option value="">📁 自动放入收件箱</option></select>
+<button id="save">一键收藏</button>
+<div id="result"></div>
+<div id="err"></div>
+<a class="openlink" href="http://localhost:3000" target="_blank">打开拾页主页 →</a>
+<script src="popup.js"></script>
+</body>
+</html>

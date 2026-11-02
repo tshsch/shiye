@@ -4,3 +4,4 @@ data.db-wal
 node.exe
 node_modules/
 .env
+ca-bundle.crt
