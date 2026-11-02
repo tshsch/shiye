@@ -1,7 +1,8 @@
-// 「拾页」Shiye - reading collection agent (zero-dependency Node.js)
+// 「拾页」Shiye - reading collection agent (zero-dependency Node.js, multi-user)
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
 
 const ROOT = __dirname;
@@ -12,7 +13,7 @@ function loadEnv() {
   if (!fs.existsSync(envPath)) return;
   for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z_]+)\s*=\s*(.*)\s*$/);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '').trim();
   }
 }
 loadEnv();
@@ -23,16 +24,20 @@ const LLM_MODEL = process.env.LLM_MODEL || 'deepseek-chat';
 const db = new DatabaseSync(path.join(ROOT, 'data.db'));
 db.exec(`
 PRAGMA journal_mode = WAL;
+CREATE TABLE IF NOT EXISTS users(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
+  salt TEXT NOT NULL, passhash TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')));
 CREATE TABLE IF NOT EXISTS folders(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, name TEXT NOT NULL,
   is_public INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')));
 CREATE TABLE IF NOT EXISTS books(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, title TEXT NOT NULL,
   author TEXT DEFAULT '', note TEXT DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')));
 CREATE TABLE IF NOT EXISTS items(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, title TEXT NOT NULL,
   url TEXT DEFAULT '', content TEXT NOT NULL,
   summary TEXT DEFAULT '', one_sentence TEXT DEFAULT '',
   minutes INTEGER DEFAULT 3, tags TEXT DEFAULT '[]',
@@ -45,12 +50,35 @@ CREATE TABLE IF NOT EXISTS chunks(
   idx INTEGER NOT NULL, text TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS comments(
   id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL,
-  user_name TEXT NOT NULL, text TEXT NOT NULL,
+  user_id INTEGER, user_name TEXT NOT NULL, text TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')));
 `);
 
-function json(res, code, data) {
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' });
+// ---------- migration（旧单用户库自动升级为多用户） ----------
+for (const t of ['items', 'folders', 'books']) {
+  try { db.exec('ALTER TABLE ' + t + ' ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1'); } catch (e) {}
+}
+try { db.exec('ALTER TABLE comments ADD COLUMN user_id INTEGER'); } catch (e) {}
+db.exec('CREATE INDEX IF NOT EXISTS idx_items_user ON items(user_id); CREATE INDEX IF NOT EXISTS idx_chunks_item ON chunks(item_id);');
+
+// ---------- sessions ----------
+const sessions = new Map(); // token -> user_id
+function parseCookies(req) {
+  const out = {};
+  for (const part of (req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+function currentUser(req) {
+  const token = parseCookies(req).shiy_token;
+  return token && sessions.has(token) ? sessions.get(token) : null;
+}
+function hash(salt, pw) { return crypto.createHash('sha256').update(salt + '::' + pw).digest('hex'); }
+
+function json(res, code, data, headers) {
+  res.writeHead(code, Object.assign({ 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' }, headers || {}));
   res.end(JSON.stringify(data));
 }
 function readBody(req) {
@@ -64,31 +92,18 @@ function readBody(req) {
 
 async function llm(messages, jsonMode) {
   if (!LLM_KEY) return null;
-  const body = { model: LLM_MODEL, messages, temperature: 0.4 };
-  if (jsonMode) body.response_format = { type: 'json_object' };
-  const r = await fetch(LLM_BASE + '/chat/completions', {
+  const base = { model: LLM_MODEL, messages, temperature: 0.4 };
+  const call = (body) => fetch(LLM_BASE + '/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + LLM_KEY },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(60000)
   });
-  if (!r.ok) {
-    const t = await r.text();
-    // 部分平台不支持 response_format，去掉后重试一次
-    if (jsonMode && (r.status === 400 || r.status === 404)) {
-      const retry = await fetch(LLM_BASE + '/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + LLM_KEY },
-        body: JSON.stringify({ model: LLM_MODEL, messages, temperature: 0.4 }),
-        signal: AbortSignal.timeout(60000)
-      });
-      if (retry.ok) {
-        const d2 = await retry.json();
-        return d2.choices[0].message.content;
-      }
-    }
-    throw new Error('LLM ' + r.status + ': ' + t.slice(0, 300));
+  let r = await call(jsonMode ? Object.assign({}, base, { response_format: { type: 'json_object' } }) : base);
+  if (!r.ok && jsonMode && (r.status === 400 || r.status === 404)) {
+    r = await call(base); // 部分平台不支持 response_format，降级重试
   }
+  if (!r.ok) throw new Error('LLM ' + r.status + ': ' + (await r.text()).slice(0, 300));
   const data = await r.json();
   return data.choices[0].message.content;
 }
@@ -156,9 +171,9 @@ function terms(q) {
   }
   return [...set];
 }
-function retrieve(question, k = 6) {
+function retrieve(question, userId, k = 6) {
   const ts = terms(question);
-  const rows = db.prepare('SELECT c.item_id, c.idx, c.text, i.title FROM chunks c JOIN items i ON i.id = c.item_id').all();
+  const rows = db.prepare('SELECT c.item_id, c.idx, c.text, i.title FROM chunks c JOIN items i ON i.id = c.item_id WHERE i.user_id = ?').all(userId);
   const scored = rows.map(r => {
     let score = 0;
     for (const t of ts) {
@@ -172,18 +187,18 @@ function retrieve(question, k = 6) {
   return scored.filter(r => { const key = r.item_id + ':' + r.idx; if (seen.has(key)) return false; seen.add(key); return true; });
 }
 
-// ---------- demo seed ----------
-function seed(force) {
-  const n = db.prepare('SELECT COUNT(*) AS n FROM items').get().n;
-  if (n > 0 && !force) return;
-  if (force) { db.exec('DELETE FROM comments; DELETE FROM chunks; DELETE FROM items; DELETE FROM books; DELETE FROM folders;'); }
-  const fInbox = db.prepare('INSERT INTO folders(name,is_public) VALUES(?,0)').run('收件箱').lastInsertRowid;
-  const fCourse = db.prepare('INSERT INTO folders(name,is_public) VALUES(?,0)').run('课程资料').lastInsertRowid;
-  const fGold = db.prepare('INSERT INTO folders(name,is_public) VALUES(?,1)').run('宝藏文章').lastInsertRowid;
-  const book = db.prepare('INSERT INTO books(title,author,note) VALUES(?,?,?)')
-    .run('置身事内', '兰小欢', '理解中国经济与政府行为的入门读物，课程推荐。').lastInsertRowid;
+// ---------- seed（演示账号） ----------
+function seedDemo() {
+  let demo = db.prepare('SELECT id FROM users WHERE username=?').get('demo');
+  if (demo) return demo.id;
+  const salt = crypto.randomBytes(8).toString('hex');
+  demo = db.prepare('INSERT INTO users(username,salt,passhash) VALUES(?,?,?)').run('demo', salt, hash(salt, 'demo123')).lastInsertRowid;
+  const fCourse = db.prepare('INSERT INTO folders(user_id,name,is_public) VALUES(?,?,0)').run(demo, '课程资料').lastInsertRowid;
+  const fGold = db.prepare('INSERT INTO folders(user_id,name,is_public) VALUES(?,?,1)').run(demo, '宝藏文章').lastInsertRowid;
+  const book = db.prepare('INSERT INTO books(user_id,title,author,note) VALUES(?,?,?,?)')
+    .run(demo, '置身事内', '兰小欢', '理解中国经济与政府行为的入门读物，课程推荐。').lastInsertRowid;
 
-  const demo = [
+  const demoItems = [
     {
       title: '土地财政：中国城市化的引擎', url: 'https://example.com/tudi-caizheng',
       folder: fCourse, book: book, author_name: '学委王同学', recommend_note: '把书里第3章讲透了，读之前先看这篇',
@@ -215,55 +230,88 @@ function seed(force) {
       content: '番茄工作法以25分钟为单位切割时间，适合任务启动困难、容易分心的人。但深度工作的研究表明，进入心流状态平均需要15-20分钟，25分钟的番茄钟可能刚好把心流打断。替代方案是"半日区块法"：上午划出2-3小时的完整区块处理最重要的深度任务，下午再用番茄钟处理碎片事务。关键洞察是：时间管理工具的选择取决于任务类型，创造型工作需要长区块，事务型工作适合短番茄。不要让工具绑架你，先观察自己一天中什么时候头脑最清醒。'
     }
   ];
-  for (const d of demo) {
-    const id = db.prepare(`INSERT INTO items(title,url,content,summary,one_sentence,minutes,tags,folder_id,book_id,author_name,recommend_note,demo)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,1)`).run(
-      d.title, d.url, d.content,
+  for (const d of demoItems) {
+    const id = db.prepare(`INSERT INTO items(user_id,title,url,content,summary,one_sentence,minutes,tags,folder_id,book_id,author_name,recommend_note,demo)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)`).run(
+      demo, d.title, d.url, d.content,
       d.content.slice(0, 110) + '……',
       d.content.slice(0, 22),
       d.minutes, JSON.stringify(d.tags), d.folder, d.book, d.author_name, d.recommend_note
     ).lastInsertRowid;
     for (const c of chunkText(d.content)) db.prepare('INSERT INTO chunks(item_id,idx,text) VALUES(?,?,?)').run(id, c.idx, c.text);
   }
-  db.prepare('INSERT INTO comments(item_id,user_name,text) VALUES(?,?,?)').run(1, '大三张同学', '原来分税制才是根源，难怪书中先讲这个');
-  db.prepare('INSERT INTO comments(item_id,user_name,text) VALUES(?,?,?)').run(1, '同班小陈', '已挂到《置身事内》第3章的资料里了，配合着读');
-  db.prepare('INSERT INTO comments(item_id,user_name,text) VALUES(?,?,?)').run(3, '隔壁班同学', '看完删掉了8门课，谢谢学姐');
+  db.prepare('INSERT INTO comments(item_id,user_id,user_name,text) VALUES(?,?,?,?)').run(1, null, '大三张同学', '原来分税制才是根源，难怪书中先讲这个');
+  db.prepare('INSERT INTO comments(item_id,user_id,user_name,text) VALUES(?,?,?,?)').run(1, null, '同班小陈', '已挂到《置身事内》第3章的资料里了，配合着读');
+  db.prepare('INSERT INTO comments(item_id,user_id,user_name,text) VALUES(?,?,?,?)').run(3, null, '隔壁班同学', '看完删掉了8门课，谢谢学姐');
+  return demo.id;
 }
-seed(false);
+seedDemo();
 
 // ---------- api ----------
 function itemRow(r) { return { ...r, tags: JSON.parse(r.tags || '[]') }; }
 
 async function handleApi(req, res, pathname, query) {
   const method = req.method;
+  const setAuth = (res, userId) => {
+    const token = crypto.randomBytes(24).toString('hex');
+    sessions.set(token, userId);
+    return { 'Set-Cookie': 'shiy_token=' + token + '; Path=/; HttpOnly; SameSite=Lax' };
+  };
 
-  if (method === 'GET' && pathname === '/api/health') {
-    return json(res, 200, { ok: true, llm: !!LLM_KEY, model: LLM_MODEL });
+  if (method === 'GET' && pathname === '/api/health') return json(res, 200, { ok: true, llm: !!LLM_KEY, model: LLM_MODEL });
+
+  // ---- auth ----
+  if (method === 'POST' && pathname === '/api/register') {
+    const b = await readBody(req);
+    const username = String(b.username || '').trim();
+    const password = String(b.password || '');
+    if (!/^[\u4e00-\u9fa5a-zA-Z0-9_]{2,20}$/.test(username)) return json(res, 400, { error: '用户名需为2-20位中文/字母/数字' });
+    if (password.length < 4) return json(res, 400, { error: '密码至少4位' });
+    if (db.prepare('SELECT id FROM users WHERE username=?').get(username)) return json(res, 400, { error: '用户名已被使用' });
+    const salt = crypto.randomBytes(8).toString('hex');
+    const id = db.prepare('INSERT INTO users(username,salt,passhash) VALUES(?,?,?)').run(username, salt, hash(salt, password)).lastInsertRowid;
+    db.prepare('INSERT INTO folders(user_id,name,is_public) VALUES(?,?,0)').run(id, '收件箱');
+    return json(res, 200, { ok: true }, setAuth(res, id));
+  }
+  if (method === 'POST' && pathname === '/api/login') {
+    const b = await readBody(req);
+    const u = db.prepare('SELECT * FROM users WHERE username=?').get(String(b.username || '').trim());
+    if (!u || u.passhash !== hash(u.salt, String(b.password || ''))) return json(res, 400, { error: '用户名或密码错误' });
+    return json(res, 200, { ok: true }, setAuth(res, u.id));
+  }
+  if (method === 'POST' && pathname === '/api/logout') {
+    const token = parseCookies(req).shiy_token;
+    if (token) sessions.delete(token);
+    return json(res, 200, { ok: true }, { 'Set-Cookie': 'shiy_token=; Path=/; Max-Age=0' });
+  }
+
+  const me = currentUser(req);
+  if (!me) return json(res, 401, { error: '请先登录' });
+  if (method === 'GET' && pathname === '/api/me') {
+    const u = db.prepare('SELECT username FROM users WHERE id=?').get(me);
+    return json(res, 200, { username: u ? u.username : '同学' });
   }
 
   if (method === 'GET' && pathname === '/api/state') {
-    const folders = db.prepare('SELECT * FROM folders ORDER BY id').all();
-    const books = db.prepare('SELECT * FROM books ORDER BY id').all();
-    const items = db.prepare('SELECT * FROM items ORDER BY id DESC').all().map(itemRow);
-    const comments = db.prepare('SELECT * FROM comments ORDER BY id').all();
-    return json(res, 200, { folders, books, items, comments, llm: !!LLM_KEY });
-  }
-
-  if (method === 'POST' && pathname === '/api/seed') {
-    seed(query.get('force') === '1');
-    return json(res, 200, { ok: true });
+    const folders = db.prepare('SELECT * FROM folders WHERE user_id=? ORDER BY id').all(me);
+    const books = db.prepare('SELECT * FROM books WHERE user_id=? ORDER BY id').all(me);
+    const items = db.prepare('SELECT * FROM items WHERE user_id=? ORDER BY id DESC').all(me).map(itemRow);
+    // 评论跨用户展示（条目自己的评论 + 书籍讨论聚合在前端做）
+    const mine = items.map(i => i.id);
+    const comments = mine.length ? db.prepare('SELECT * FROM comments WHERE item_id IN (' + mine.map(() => '?').join(',') + ') ORDER BY id').all(...mine) : [];
+    return json(res, 200, { folders, books, items, comments, llm: !!LLM_KEY, username: (db.prepare('SELECT username FROM users WHERE id=?').get(me) || {}).username });
   }
 
   if (method === 'POST' && pathname === '/api/folders') {
     const b = await readBody(req);
     if (!b.name) return json(res, 400, { error: '缺少名称' });
-    const id = db.prepare('INSERT INTO folders(name,is_public) VALUES(?,?)').run(String(b.name).slice(0, 40), b.is_public ? 1 : 0).lastInsertRowid;
+    const id = db.prepare('INSERT INTO folders(user_id,name,is_public) VALUES(?,?,?)').run(me, String(b.name).slice(0, 40), b.is_public ? 1 : 0).lastInsertRowid;
     return json(res, 200, { id });
   }
   const fm = pathname.match(/^\/api\/folders\/(\d+)$/);
   if (method === 'PATCH' && fm) {
     const b = await readBody(req);
-    const f = db.prepare('SELECT * FROM folders WHERE id=?').get(Number(fm[1]));
+    const f = db.prepare('SELECT * FROM folders WHERE id=? AND user_id=?').get(Number(fm[1]), me);
     if (!f) return json(res, 404, { error: 'not found' });
     if ('name' in b) db.prepare('UPDATE folders SET name=? WHERE id=?').run(String(b.name).slice(0, 40), f.id);
     if ('is_public' in b) db.prepare('UPDATE folders SET is_public=? WHERE id=?').run(b.is_public ? 1 : 0, f.id);
@@ -273,8 +321,8 @@ async function handleApi(req, res, pathname, query) {
   if (method === 'POST' && pathname === '/api/books') {
     const b = await readBody(req);
     if (!b.title) return json(res, 400, { error: '缺少书名' });
-    const id = db.prepare('INSERT INTO books(title,author,note) VALUES(?,?,?)')
-      .run(String(b.title).slice(0, 80), String(b.author || '').slice(0, 40), String(b.note || '').slice(0, 200)).lastInsertRowid;
+    const id = db.prepare('INSERT INTO books(user_id,title,author,note) VALUES(?,?,?,?)')
+      .run(me, String(b.title).slice(0, 80), String(b.author || '').slice(0, 40), String(b.note || '').slice(0, 200)).lastInsertRowid;
     return json(res, 200, { id });
   }
 
@@ -286,8 +334,8 @@ async function handleApi(req, res, pathname, query) {
         url = b.url;
         try {
           const ext = await extractFromUrl(url);
-          if (ext.text && ext.text.length >= 200) { title = ext.title; text = ext.text; }
-        } catch (e) { /* 服务器抓取失败时回退到客户端带来的正文 */ }
+          if (ext.text && ext.text.length >= 200) { title = ext.title || title; text = ext.text; }
+        } catch (e) { /* 回退到客户端正文 */ }
         if (!text && b.text && b.text.trim().length > 30) text = b.text.trim().slice(0, 16000);
         if (!text) return json(res, 422, { error: '该网页抓取失败（可能有登录墙），请去主页手动粘贴正文' });
       } else if (b.text && b.text.trim().length > 30) {
@@ -299,16 +347,16 @@ async function handleApi(req, res, pathname, query) {
       try { a = JSON.parse(await llm(analyzePrompt(title, text), true)); } catch (e) { /* fallback below */ }
       if (!a || !a.summary) a = fallbackAnalyze(title, text);
       title = (a.title || title || text.slice(0, 30)).slice(0, 80);
-      const id = db.prepare(`INSERT INTO items(title,url,content,summary,one_sentence,minutes,tags,folder_id,book_id)
-        VALUES(?,?,?,?,?,?,?,?,?)`).run(
-        title, url, text, a.summary || '', a.one_sentence || '',
+      const id = db.prepare(`INSERT INTO items(user_id,title,url,content,summary,one_sentence,minutes,tags,folder_id,book_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`).run(
+        me, title, url, text, a.summary || '', a.one_sentence || '',
         Math.max(1, Math.min(60, a.minutes || 3)),
         JSON.stringify((a.tags || ['待整理']).slice(0, 3)),
         b.folder_id || null, b.book_id || null
       ).lastInsertRowid;
       for (const c of chunkText(text)) db.prepare('INSERT INTO chunks(item_id,idx,text) VALUES(?,?,?)').run(id, c.idx, c.text);
       const item = itemRow(db.prepare('SELECT * FROM items WHERE id=?').get(id));
-      return json(res, 200, { item, ai: !!a && !!LLM_KEY });
+      return json(res, 200, { item, ai: !!LLM_KEY && a.summary !== fallbackAnalyze(title, text).summary || !!(a && a.tags && a.tags.length && a.tags[0] !== '待整理') });
     } catch (e) {
       return json(res, 422, { error: String(e.message || e) });
     }
@@ -317,7 +365,7 @@ async function handleApi(req, res, pathname, query) {
   const im = pathname.match(/^\/api\/items\/(\d+)$/);
   if (method === 'PATCH' && im) {
     const b = await readBody(req);
-    const item = db.prepare('SELECT * FROM items WHERE id=?').get(Number(im[1]));
+    const item = db.prepare('SELECT * FROM items WHERE id=? AND user_id=?').get(Number(im[1]), me);
     if (!item) return json(res, 404, { error: 'not found' });
     if ('folder_id' in b) db.prepare('UPDATE items SET folder_id=? WHERE id=?').run(b.folder_id || null, item.id);
     if ('book_id' in b) db.prepare('UPDATE items SET book_id=? WHERE id=?').run(b.book_id || null, item.id);
@@ -326,17 +374,23 @@ async function handleApi(req, res, pathname, query) {
     return json(res, 200, { ok: true });
   }
   if (method === 'DELETE' && im) {
-    db.prepare('DELETE FROM chunks WHERE item_id=?').run(Number(im[1]));
-    db.prepare('DELETE FROM comments WHERE item_id=?').run(Number(im[1]));
-    db.prepare('DELETE FROM items WHERE id=?').run(Number(im[1]));
+    const item = db.prepare('SELECT id FROM items WHERE id=? AND user_id=?').get(Number(im[1]), me);
+    if (item) {
+      db.prepare('DELETE FROM chunks WHERE item_id=?').run(item.id);
+      db.prepare('DELETE FROM comments WHERE item_id=?').run(item.id);
+      db.prepare('DELETE FROM items WHERE id=?').run(item.id);
+    }
     return json(res, 200, { ok: true });
   }
 
   if (method === 'POST' && pathname === '/api/comments') {
     const b = await readBody(req);
     if (!b.item_id || !b.text) return json(res, 400, { error: '缺少内容' });
-    const id = db.prepare('INSERT INTO comments(item_id,user_name,text) VALUES(?,?,?)')
-      .run(Number(b.item_id), String(b.user_name || '同学').slice(0, 20), String(b.text).slice(0, 300)).lastInsertRowid;
+    const target = db.prepare('SELECT id FROM items WHERE id=?').get(Number(b.item_id));
+    if (!target) return json(res, 404, { error: 'not found' });
+    const u = db.prepare('SELECT username FROM users WHERE id=?').get(me);
+    const id = db.prepare('INSERT INTO comments(item_id,user_id,user_name,text) VALUES(?,?,?,?)')
+      .run(Number(b.item_id), me, String(b.user_name || (u ? u.username : '同学')).slice(0, 20), String(b.text).slice(0, 300)).lastInsertRowid;
     return json(res, 200, { id });
   }
 
@@ -344,17 +398,16 @@ async function handleApi(req, res, pathname, query) {
     const b = await readBody(req);
     const q = String(b.question || '').trim();
     if (!q) return json(res, 400, { error: '请输入问题' });
-    const hits = retrieve(q);
+    const hits = retrieve(q, me);
     if (!hits.length) return json(res, 200, { answer: '你的收藏库里暂时没有和这个问题相关的内容。先收藏几篇文章再来问我吧。', sources: [] });
-    const sourceList = [];
-    const seenItem = new Map();
+    const byItem = new Map();
     for (const h of hits) {
-      if (!seenItem.has(h.item_id)) seenItem.set(h.item_id, []);
-      seenItem.get(h.item_id).push(h);
+      if (!byItem.has(h.item_id)) byItem.set(h.item_id, []);
+      byItem.get(h.item_id).push(h);
     }
-    const context = [];
+    const context = []; const sourceList = [];
     let n = 1;
-    for (const [itemId, hs] of seenItem) {
+    for (const [itemId, hs] of byItem) {
       for (const h of hs) {
         context.push('[' + n + '] ' + h.title + '：' + h.text);
         sourceList.push({ n, item_id: itemId, title: h.title, snippet: h.text.slice(0, 120) });
@@ -399,12 +452,12 @@ const server = http.createServer(async (req, res) => {
     return json(res, 500, { error: String(e.message || e) });
   }
 });
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log('');
-  console.log('  拾页已启动: http://localhost:' + PORT);
+  console.log('  拾页已启动: http://localhost:' + PORT + '（局域网/公网用户请用对应地址访问）');
   console.log('  AI 能力: ' + (LLM_KEY ? '已连接 (' + LLM_MODEL + ')' : '未配置 key，运行在演示模式'));
+  console.log('  演示账号: demo / demo123');
   console.log('');
 });
-
 
 

@@ -68,6 +68,17 @@ select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size
 .suggest{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 .suggest button{font-size:12px;border:1px solid var(--line);background:#fff;border-radius:99px;padding:6px 12px;color:var(--sub);cursor:pointer}
 .suggest button:hover{border-color:var(--accent);color:var(--accent)}
+.authmask{position:fixed;inset:0;background:linear-gradient(135deg,#4f46e5,#7c3aed);display:none;align-items:center;justify-content:center;z-index:200}
+.authmask.show{display:flex}
+.authbox{background:#fff;border-radius:20px;padding:34px 30px;width:340px;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+.authbox h1{text-align:center;font-size:24px}.authbox h1 span{color:var(--accent)}
+.authbox p{text-align:center;color:var(--sub);font-size:13px;margin:6px 0 18px}
+.authbox input{width:100%;border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:14px;margin-bottom:10px;outline:none}
+.authbox input:focus{border-color:var(--accent)}
+.authbox .btn{width:100%;margin-top:4px}
+.authbox .switch{text-align:center;font-size:13px;color:var(--sub);margin-top:14px}
+.authbox .switch b{color:var(--accent);cursor:pointer}
+.autherr{color:#dc2626;font-size:12px;text-align:center;min-height:16px;margin-bottom:6px}
 .toast{position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:var(--ink);color:#fff;padding:10px 22px;border-radius:99px;font-size:13px;display:none;z-index:99}
 .loading{display:inline-block;width:16px;height:16px;border:2px solid #fff;border-top-color:transparent;border-radius:50%;animation:spin .7s linear infinite;vertical-align:-3px;margin-right:6px}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -88,7 +99,7 @@ select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size
     <button data-tab="shelf">书架</button>
     <button data-tab="square">广场</button>
     <button data-tab="chat">问收藏</button>
-  </nav>
+  </nav><span class="badge" id="userBadge" style="display:none"></span>
 </header>
 <main>
   <div class="hero">
@@ -142,6 +153,17 @@ select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size
 
 <div class="mask" id="mask" onclick="if(event.target===this)closeModal()">
   <div class="modal" id="modalBody"></div>
+</div>
+<div class="authmask" id="authMask">
+  <div class="authbox">
+    <h1>拾<span>页</span></h1>
+    <p>随手收藏，AI 帮你读懂、记住</p>
+    <div class="autherr" id="authErr"></div>
+    <input id="authUser" placeholder="用户名（2-20位）">
+    <input id="authPass" type="password" placeholder="密码（至少4位）">
+    <button class="btn" id="authGo">登录</button>
+    <div class="switch">还没有账号？<b id="authSwitch">注册一个</b></div>
+  </div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -332,9 +354,40 @@ async function sendChat(){
 }
 $('chatInput').addEventListener('keydown', e => { if(e.key==='Enter') sendChat(); });
 
-refresh();
+// ---------- auth ----------
+let registering = false;
+function showAuth(){ $('authMask').classList.add('show'); }
+async function boot(){
+  try {
+    const me = await api('me');
+    $('userBadge').textContent = '👋 ' + me.username;
+    $('userBadge').style.display = '';
+    await refresh();
+  } catch(e){ showAuth(); }
+}
+$('authSwitch').onclick = () => {
+  registering = !registering;
+  $('authGo').textContent = registering ? '注册并进入' : '登录';
+  $('authSwitch').textContent = registering ? '直接登录' : '注册一个';
+  $('authErr').textContent = '';
+};
+$('authGo').onclick = async () => {
+  const u = $('authUser').value.trim(), p = $('authPass').value;
+  $('authErr').textContent = '';
+  try {
+    await api(registering ? 'register' : 'login', 'POST', { username: u, password: p });
+    $('authMask').classList.remove('show');
+    await boot();
+  } catch(e){ $('authErr').textContent = e.message; }
+};
+$('authPass').addEventListener('keydown', e => { if(e.key==='Enter') $('authGo').click(); });
+$('userBadge').onclick = async () => {
+  if (confirm('退出登录？')) { await api('logout','POST'); location.reload(); }
+};
+boot();
 </script>
 </body>
 </html>
+
 
 
