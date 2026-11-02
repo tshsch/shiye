@@ -219,7 +219,18 @@ function renderFolders(){
     html += `<div class="folder-chip ${curFolder===f.id?'on':''}" onclick="curFolder=${f.id};renderFolders();renderItems()">${esc(f.name)} ${cnt} ${f.is_public?'<span class="pub">公开</span>':''}</div>`;
   }
   html += `<div class="folder-chip" onclick="newFolder()">＋ 新建</div>`;
+  if (curFolder !== 'all') {
+    const cf = S.folders.find(x => x.id === curFolder);
+    if (cf) html += `<div class="folder-chip" onclick="togglePublic(${cf.id})">${cf.is_public ? '🔒 设为私有' : '🌐 设为公开（广场可见）'}</div>`;
+  }
   strip.innerHTML = html;
+}
+async function togglePublic(id){
+  const f = S.folders.find(x => x.id === id);
+  if (!f) return;
+  if (!f.is_public && !confirm('设为公开后，这个夹子里的内容会出现在校园广场，确定？')) return;
+  await api('folders/' + id, 'PATCH', { is_public: !f.is_public });
+  refresh(); toast(f.is_public ? '已设为私有' : '已公开，广场可见');
 }
 async function newFolder(){
   const name = prompt('收藏夹名称：'); if(!name) return;
@@ -264,6 +275,9 @@ function openItem(id){
       📖 <select id="mBook">${bookOpts}</select>
       <button class="btn small ghost" onclick="saveMeta(${id})">保存</button>
     </div>
+    <div class="selrow" style="margin:-4px 0 14px">
+      💬 <input id="mNote" placeholder="推荐到广场的理由（选填，写了就上广场）" value="${esc(it.recommend_note)}" style="flex:1;border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px">
+    </div>
     <details><summary style="cursor:pointer;font-size:13px;color:var(--sub)">查看正文</summary><div class="content" style="margin-top:10px">${esc(it.content)}</div></details>
     <div class="section" style="font-size:14px;margin:16px 0 4px">评论讨论</div>
     ${cs.map(c=>`<div class="comment"><b>${esc(c.user_name)}</b><span class="c-sub">${c.created_at}</span><br>${esc(c.text)}</div>`).join('') || '<div class="hint">还没有评论</div>'}
@@ -276,8 +290,8 @@ function openItem(id){
 }
 function closeModal(){ $('mask').classList.remove('show'); }
 async function saveMeta(id){
-  await api('items/'+id,'PATCH',{ folder_id: $('mFolder').value || null, book_id: $('mBook').value || null });
-  await refresh(); closeModal(); toast('已保存');
+  await api('items/'+id,'PATCH',{ folder_id: $('mFolder').value || null, book_id: $('mBook').value || null, recommend_note: $('mNote').value.trim(), author_name: S.username || '同学' });
+  await refresh(); closeModal(); toast($('mNote').value.trim() ? '已保存并推荐到广场' : '已保存');
 }
 async function postComment(id){
   const name = $('cname').value.trim() || '同学', text = $('ctext').value.trim();
@@ -386,6 +400,7 @@ boot();
 </script>
 </body>
 </html>
+
 
 
 
