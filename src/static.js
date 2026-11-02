@@ -20,7 +20,10 @@ function serveStatic(res, pathname) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     return res.end('404');
   }
-  res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+  res.writeHead(200, {
+    'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+    'Cache-Control': 'no-cache'
+  });
   fs.createReadStream(file).pipe(res);
 }
 
