@@ -408,9 +408,11 @@ async function handleApi(req, res, pathname, query) {
     const context = []; const sourceList = [];
     let n = 1;
     for (const [itemId, hs] of byItem) {
+      let cited = false;
       for (const h of hs) {
         context.push('[' + n + '] ' + h.title + '：' + h.text);
-        sourceList.push({ n, item_id: itemId, title: h.title, snippet: h.text.slice(0, 120) });
+        if (!cited) sourceList.push({ n, item_id: itemId, title: h.title, snippet: h.text.slice(0, 120) });
+        cited = true;
         n++;
       }
     }
@@ -459,5 +461,6 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('  演示账号: demo / demo123');
   console.log('');
 });
+
 
 
