@@ -310,7 +310,8 @@ async function handleApi(req, res, pathname, query) {
     const comments = mine.length ? db.prepare('SELECT * FROM comments WHERE item_id IN (' + mine.map(() => '?').join(',') + ') ORDER BY id').all(...mine) : [];
     const square = db.prepare(`SELECT i.id, i.title, i.one_sentence, i.minutes, i.recommend_note, i.author_name, i.user_id,
       u.username AS owner, f.name AS folder_name,
-      (SELECT COUNT(*) FROM comments c WHERE c.item_id = i.id) AS comment_count
+      (SELECT COUNT(*) FROM comments c WHERE c.item_id = i.id) AS comment_count,
+      (SELECT c.user_name || '：' || c.text FROM comments c WHERE c.item_id = i.id ORDER BY c.id DESC LIMIT 1) AS hot_comment
       FROM items i LEFT JOIN folders f ON f.id = i.folder_id LEFT JOIN users u ON u.id = i.user_id
       WHERE f.is_public = 1 OR (i.recommend_note IS NOT NULL AND i.recommend_note != '')
       ORDER BY i.id DESC LIMIT 50`).all();
@@ -378,6 +379,18 @@ async function handleApi(req, res, pathname, query) {
   }
 
   const im = pathname.match(/^\/api\/items\/(\d+)$/);
+  if (method === 'GET' && im) {
+    const item = db.prepare('SELECT * FROM items WHERE id=?').get(Number(im[1]));
+    if (!item) return json(res, 404, { error: 'not found' });
+    let allowed = item.user_id === me;
+    if (!allowed) {
+      const f = item.folder_id ? db.prepare('SELECT is_public FROM folders WHERE id=?').get(item.folder_id) : null;
+      allowed = (f && f.is_public === 1) || (item.recommend_note && item.recommend_note !== '');
+    }
+    if (!allowed) return json(res, 403, { error: '该内容未公开，无法查看' });
+    const comments = db.prepare('SELECT * FROM comments WHERE item_id=? ORDER BY id').all(item.id);
+    return json(res, 200, { item: itemRow(item), comments });
+  }
   if (method === 'PATCH' && im) {
     const b = await readBody(req);
     const item = db.prepare('SELECT * FROM items WHERE id=? AND user_id=?').get(Number(im[1]), me);
@@ -476,6 +489,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('  演示账号: demo / demo123');
   console.log('');
 });
+
 
 
 

@@ -86,7 +86,7 @@ select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size
 @keyframes pop{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .bubble{animation:pop .2s ease}
 .note{font-size:13px;color:var(--green);background:#f0fdfa;border:1px solid #99f6e4;border-radius:10px;padding:10px 14px;margin-top:12px;display:none}
-.reco{font-size:12px;color:var(--green);background:#f0fdfa;border-radius:8px;padding:6px 10px}
+.hotc{font-size:12px;color:#b45309;background:#fffbeb;border-radius:8px;padding:6px 10px}\n.reco{font-size:12px;color:var(--green);background:#f0fdfa;border-radius:8px;padding:6px 10px}
 .del{position:absolute;top:10px;right:12px;color:#ccc;font-size:15px;cursor:pointer}.del:hover{color:#ef4444}
 </style>
 </head>
@@ -260,29 +260,46 @@ function renderItems(){
 async function delItem(id){ if(!confirm('删除这条收藏？'))return; await api('items/'+id,'DELETE'); refresh(); }
 
 // ---------- modal ----------
-function openItem(id){
-  const it = S.items.find(i=>i.id===id); if(!it) return;
-  const cs = S.comments.filter(c=>c.item_id===id);
-  const folderOpts = S.folders.map(f=>`<option value="${f.id}" ${f.id===it.folder_id?'selected':''}>${esc(f.name)}</option>`).join('');
-  const bookOpts = '<option value="">不挂到书</option>' + S.books.map(b=>`<option value="${b.id}" ${b.id===it.book_id?'selected':''}>${esc(b.title)}</option>`).join('');
+async function openItem(id){
+  let it = S.items.find(i=>i.id===id), cs = null;
+  let ownerView = !!it;
+  if (!it) {
+    try {
+      const d = await api('items/'+id);
+      it = d.item; cs = d.comments;
+    } catch(e){ toast(e.message || '无法查看'); return; }
+  } else {
+    cs = S.comments.filter(c=>c.item_id===id);
+  }
+  it = { ...it, tags: Array.isArray(it.tags) ? it.tags : JSON.parse(it.tags || '[]') };
+  let selectorHtml = '', noteHtml = '';
+  if (ownerView) {
+    const folderOpts = S.folders.map(f=>`<option value="${f.id}" ${f.id===it.folder_id?'selected':''}>${esc(f.name)}</option>`).join('');
+    const bookOpts = '<option value="">不挂到书</option>' + S.books.map(b=>`<option value="${b.id}" ${b.id===it.book_id?'selected':''}>${esc(b.title)}</option>`).join('');
+    selectorHtml = `
+    <div class="selrow" style="margin-top:12px">
+      📁 <select id="mFolder">${folderOpts}</select>
+      📖 <select id="mBook">${bookOpts}</select>
+      <button class="btn small ghost" onclick="saveMeta(${id})">保存</button>
+    </div>`;
+    noteHtml = `
+    <div class="selrow" style="margin:-4px 0 14px">
+      💬 <input id="mNote" placeholder="推荐到广场的理由（选填，写了就上广场）" value="${esc(it.recommend_note)}" style="flex:1;border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px">
+    </div>`;
+  } else {
+    selectorHtml = `<div class="hint" style="margin:10px 0">👤 来自 <b>${esc(it.owner_name || '同学')}</b> 的收藏</div>`;
+  }
   $('modalBody').innerHTML = `
     <h2>${esc(it.title)}</h2>
     <div class="meta"><span>约 ${it.minutes} 分钟读完</span>${it.url?`<a href="${esc(it.url)}" target="_blank">原文链接</a>`:''}</div>
     <div class="sum"><b>AI 导读</b><br>${esc(it.summary)}</div>
     <div class="tags">${it.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>
-    <div class="selrow" style="margin-top:12px">
-      📁 <select id="mFolder">${folderOpts}</select>
-      📖 <select id="mBook">${bookOpts}</select>
-      <button class="btn small ghost" onclick="saveMeta(${id})">保存</button>
-    </div>
-    <div class="selrow" style="margin:-4px 0 14px">
-      💬 <input id="mNote" placeholder="推荐到广场的理由（选填，写了就上广场）" value="${esc(it.recommend_note)}" style="flex:1;border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px">
-    </div>
+    ${selectorHtml}
+    ${noteHtml}
     <details><summary style="cursor:pointer;font-size:13px;color:var(--sub)">查看正文</summary><div class="content" style="margin-top:10px">${esc(it.content)}</div></details>
     <div class="section" style="font-size:14px;margin:16px 0 4px">评论讨论</div>
     ${cs.map(c=>`<div class="comment"><b>${esc(c.user_name)}</b><span class="c-sub">${c.created_at}</span><br>${esc(c.text)}</div>`).join('') || '<div class="hint">还没有评论</div>'}
     <div class="cform">
-      <input id="cname" placeholder="你的名字" style="max-width:90px">
       <input id="ctext" placeholder="写点什么…" onkeydown="if(event.key==='Enter')postComment(${id})">
       <button class="btn small" onclick="postComment(${id})">发送</button>
     </div>`;
@@ -342,6 +359,7 @@ function renderSquare(){
       <div class="reco">💬 ${esc(it.author_name||it.owner||'同学')}：${esc(it.recommend_note||'觉得不错，分享给大家')}</div>
       <h3>${esc(it.title)}</h3>
       <div class="one">${esc(it.one_sentence)}</div>
+      ${it.hot_comment ? `<div class="hotc">🔥 ${esc(it.hot_comment)}</div>` : ''}
       <div class="meta"><span>👤 ${esc(it.owner||'同学')}${mine?'（你）':''}</span><span>💬 ${it.comment_count||0} 条讨论</span><span>约 ${it.minutes} 分钟</span></div>`;
     g.appendChild(card);
   }
@@ -400,6 +418,7 @@ boot();
 </script>
 </body>
 </html>
+
 
 
 
