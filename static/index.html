@@ -145,6 +145,7 @@ window.addEventListener('unhandledrejection', function(e){
 
   <div id="tab-inbox">
     <div class="section">收藏夹</div>
+    <input id="searchBox" placeholder="🔍 搜索标题 / 摘要 / 标签…" style="width:100%;border:1px solid var(--line);border-radius:99px;padding:9px 16px;font-size:13px;margin-bottom:10px;outline:none" oninput="renderItems()">
     <div class="folder-strip" id="folderStrip"></div>
     <div class="grid" id="itemGrid"></div>
   </div>
@@ -286,11 +287,18 @@ async function newFolder(){
   await api('folders','POST',{name}); refresh();
 }
 function visibleItems(){
-  return curFolder==='all' ? S.items : S.items.filter(i=>i.folder_id===curFolder);
+  let list = curFolder==='all' ? S.items : S.items.filter(i=>i.folder_id===curFolder);
+  const kw = ($('searchBox') && $('searchBox').value.trim().toLowerCase()) || '';
+  if (kw) list = list.filter(i =>
+    (i.title||'').toLowerCase().includes(kw) ||
+    (i.summary||'').toLowerCase().includes(kw) ||
+    (i.one_sentence||'').toLowerCase().includes(kw) ||
+    (i.tags||[]).some(t=>t.toLowerCase().includes(kw)));
+  return list;
 }
 function renderItems(){
   const g = $('itemGrid'); const items = visibleItems();
-  g.innerHTML = items.length ? '' : '<div class="empty" style="grid-column:1/-1">这里还空空的，先收藏一篇文章吧</div>';
+  g.innerHTML = items.length ? '' : '<div class="empty" style="grid-column:1/-1">' + (($('searchBox')&&$('searchBox').value.trim()) ? '没有匹配的收藏，换个关键词试试' : '这里还空空的，先收藏一篇文章吧') + '</div>';
   for (const it of items){
     const book = S.books.find(b=>b.id===it.book_id);
     const folder = S.folders.find(f=>f.id===it.folder_id);
