@@ -60,6 +60,10 @@ CREATE TABLE IF NOT EXISTS comments(
   created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')));
 `);
 
+function normBookTitle(s) {
+  return String(s || '').replace(/[《》〔〕\s]/g, '').trim().toLowerCase();
+}
+
 // ---------- migration（旧单用户库自动升级为多用户） ----------
 for (const t of ['items', 'folders', 'books']) {
   try { db.exec('ALTER TABLE ' + t + ' ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1'); } catch (e) {}
@@ -69,6 +73,24 @@ try { db.exec("ALTER TABLE users ADD COLUMN nickname TEXT DEFAULT ''"); } catch 
 try { db.exec("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''"); } catch (e) {}
 try { db.exec("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ''"); } catch (e) {}
 db.exec('CREATE INDEX IF NOT EXISTS idx_items_user ON items(user_id); CREATE INDEX IF NOT EXISTS idx_chunks_item ON chunks(item_id);');
+
+// ---------- books 全局共享：规范书名去重（同名书合并为一本） ----------
+try { db.exec("ALTER TABLE books ADD COLUMN norm TEXT DEFAULT ''"); } catch (e) {}
+function migrateBooksNorm() {
+  for (const r of db.prepare('SELECT id, title, norm FROM books').all()) {
+    const n = normBookTitle(r.title);
+    if (n && n !== r.norm) db.prepare('UPDATE books SET norm=? WHERE id=?').run(n, r.id);
+  }
+  for (const d of db.prepare("SELECT norm, MIN(id) AS keep, COUNT(*) AS n FROM books WHERE norm != '' GROUP BY norm HAVING n > 1").all()) {
+    for (const x of db.prepare('SELECT id FROM books WHERE norm=? AND id != ?').all(d.norm, d.keep)) {
+      db.prepare('UPDATE items SET book_id=? WHERE book_id=?').run(d.keep, x.id);
+      db.prepare('DELETE FROM books WHERE id=?').run(x.id);
+    }
+  }
+}
+db.prepare("UPDATE books SET norm='bk'||id WHERE norm='' OR norm IS NULL").run();
+migrateBooksNorm();
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_books_norm ON books(norm);');
 
 // ---------- sessions ----------
 const sessions = new Map(); // token -> user_id
@@ -311,8 +333,22 @@ function seedDemo() {
   return demo.id;
 }
 seedDemo();
+migrateBooksNorm();
 
 // ---------- api ----------
+// AI 规范化书名：判断是否真实书籍 + 与已有书库匹配（译名/副标题/书名号差异归一到同一本）
+async function canonicalBook(input) {
+  const existing = db.prepare('SELECT id, title, author FROM books ORDER BY id').all();
+  const list = existing.map(b => b.id + '. 《' + b.title + '》' + (b.author ? ' 作者：' + b.author : '')).join('\n');
+  const out = await llm([
+    { role: 'system', content: '帮学生把"想挂资料的书"归一到书库里的同一本书。判断输入是不是一本真实存在的书（专著/教材/译作/工具书都算；课程名、文章标题、话题不算书）。如果是书，且与已有书库中某本是同一本书（不同译名、带副标题、书名号差异都算同一本），返回那本书的 book_id；否则给出最通用的中文规范书名。只返回 JSON：{"is_book":true或false,"book_id":已有书id或null,"title":"规范书名(不带书名号)","author":"作者名或空字符串"}' },
+    { role: 'user', content: '已有书库：\n' + (list || '（空）') + '\n\n用户输入：' + input }
+  ], true);
+  const j = JSON.parse(out);
+  if (!j || typeof j !== 'object') throw new Error('bad ai output');
+  return j;
+}
+
 function itemRow(r) { return { ...r, tags: JSON.parse(r.tags || '[]') }; }
 
 async function handleApi(req, res, pathname, query) {
@@ -361,17 +397,22 @@ async function handleApi(req, res, pathname, query) {
 
   if (method === 'GET' && pathname === '/api/state') {
     const folders = db.prepare('SELECT * FROM folders WHERE user_id=? ORDER BY id').all(me);
-    const books = db.prepare('SELECT * FROM books WHERE user_id=? ORDER BY id').all(me);
+    // 书全局共享：我的书架 = 我创建的 + 我挂过资料的书
+    const books = db.prepare(`SELECT b.*,
+      (SELECT COUNT(*) FROM items i WHERE i.book_id=b.id AND i.user_id=?) AS my_items,
+      (SELECT COUNT(DISTINCT i2.user_id) FROM items i2 WHERE i2.book_id=b.id) AS readers
+      FROM books b WHERE b.user_id=? OR EXISTS(SELECT 1 FROM items i3 WHERE i3.book_id=b.id AND i3.user_id=?)
+      ORDER BY b.id`).all(me, me, me);
     const items = db.prepare('SELECT * FROM items WHERE user_id=? ORDER BY id DESC').all(me).map(itemRow);
     // 评论跨用户展示（条目自己的评论 + 书籍讨论聚合在前端做）
     const mine = items.map(i => i.id);
     let comments = [];
     for (const iid of mine) comments = comments.concat(commentsFor(iid, me));
     const square = db.prepare(`SELECT i.id, i.title, i.one_sentence, i.minutes, i.recommend_note, i.author_name, i.user_id,
-      u.username AS owner, f.name AS folder_name,
+      u.username AS owner, f.name AS folder_name, i.book_id, bb.title AS book_title, i.tags,
       (SELECT COUNT(*) FROM comments c WHERE c.item_id = i.id) AS comment_count,
       (SELECT COALESCE(NULLIF(u2.nickname,''), u2.username, c.user_name) || '：' || c.text FROM comments c LEFT JOIN users u2 ON u2.id = c.user_id WHERE c.item_id = i.id ORDER BY (SELECT COUNT(*) FROM comment_likes cl WHERE cl.comment_id = c.id) DESC, c.id DESC LIMIT 1) AS hot_comment
-      FROM items i LEFT JOIN folders f ON f.id = i.folder_id LEFT JOIN users u ON u.id = i.user_id
+      FROM items i LEFT JOIN folders f ON f.id = i.folder_id LEFT JOIN users u ON u.id = i.user_id LEFT JOIN books bb ON bb.id = i.book_id
       WHERE f.is_public = 1 OR (i.recommend_note IS NOT NULL AND i.recommend_note != '')
       ORDER BY i.id DESC LIMIT 50`).all();
     return json(res, 200, { folders, books, items, comments, square, llm: !!LLM_KEY, username: (db.prepare('SELECT username FROM users WHERE id=?').get(me) || {}).username });
@@ -395,10 +436,55 @@ async function handleApi(req, res, pathname, query) {
 
   if (method === 'POST' && pathname === '/api/books') {
     const b = await readBody(req);
-    if (!b.title) return json(res, 400, { error: '缺少书名' });
-    const id = db.prepare('INSERT INTO books(user_id,title,author,note) VALUES(?,?,?,?)')
-      .run(me, String(b.title).slice(0, 80), String(b.author || '').slice(0, 40), String(b.note || '').slice(0, 200)).lastInsertRowid;
-    return json(res, 200, { id });
+    const raw = String(b.title || '').trim().slice(0, 80);
+    if (!raw) return json(res, 400, { error: '缺少书名' });
+    const norm = normBookTitle(raw);
+    let book = norm ? db.prepare('SELECT * FROM books WHERE norm=?').get(norm) : null;
+    let created = false, ai = false;
+    if (!book && LLM_KEY) {
+      try {
+        const c = await canonicalBook(raw);
+        if (c.book_id) {
+          book = db.prepare('SELECT * FROM books WHERE id=?').get(Number(c.book_id)) || null;
+          ai = true;
+        } else if (c.is_book === false) {
+          return json(res, 422, { error: '「' + raw + '」看起来不像一本书名（可能是文章或课程）。书架用来聚合某本书的资料，请换一个真实的书名。' });
+        } else {
+          const t = String(c.title || raw).replace(/[《》]/g, '').trim().slice(0, 80);
+          book = db.prepare('SELECT * FROM books WHERE norm=?').get(normBookTitle(t)) || null;
+          if (!book) {
+            const nid = db.prepare('INSERT INTO books(user_id,title,author,note,norm) VALUES(?,?,?,?,?)')
+              .run(me, t, String(c.author || b.author || '').slice(0, 40), String(b.note || '').slice(0, 200), normBookTitle(t)).lastInsertRowid;
+            book = db.prepare('SELECT * FROM books WHERE id=?').get(nid);
+            created = true;
+          }
+          ai = true;
+        }
+      } catch (e) { /* AI 失败退回精确匹配 */ }
+    }
+    if (!book) {
+      const nid = db.prepare('INSERT INTO books(user_id,title,author,note,norm) VALUES(?,?,?,?,?)')
+        .run(me, raw, String(b.author || '').slice(0, 40), String(b.note || '').slice(0, 200), norm).lastInsertRowid;
+      book = db.prepare('SELECT * FROM books WHERE id=?').get(nid);
+      created = true;
+    }
+    return json(res, 200, { id: book.id, title: book.title, created, ai });
+  }
+
+  // 书籍详情（公开）：我的资料 + 其他同学的公开资料
+  const bm = pathname.match(/^\/api\/books\/(\d+)$/);
+  if (method === 'GET' && bm) {
+    const book = db.prepare('SELECT * FROM books WHERE id=?').get(Number(bm[1]));
+    if (!book) return json(res, 404, { error: 'not found' });
+    const mine = db.prepare('SELECT * FROM items WHERE book_id=? AND user_id=? ORDER BY id DESC').all(book.id, me).map(itemRow);
+    const others = db.prepare(`SELECT i.*, u.username AS owner, COALESCE(NULLIF(u.nickname,''), u.username) AS owner_name, u.avatar AS owner_avatar
+      FROM items i LEFT JOIN users u ON u.id = i.user_id
+      WHERE i.book_id=? AND i.user_id != ? AND (
+        EXISTS(SELECT 1 FROM folders f WHERE f.id = i.folder_id AND f.is_public = 1)
+        OR (i.recommend_note IS NOT NULL AND i.recommend_note != ''))
+      ORDER BY i.id DESC LIMIT 50`).all(book.id, me).map(itemRow);
+    const readers = db.prepare('SELECT COUNT(DISTINCT user_id) AS n FROM items WHERE book_id=?').get(book.id).n;
+    return json(res, 200, { book, mine, others, readers });
   }
 
   if (method === 'POST' && pathname === '/api/items') {

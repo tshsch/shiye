@@ -103,6 +103,13 @@ sup.cite{color:var(--accent);cursor:pointer;font-weight:700;margin:0 2px}
 .recoBtn{color:var(--accent);cursor:pointer;font-weight:600;user-select:none}
 .recoBtn:hover{text-decoration:underline}
 .del{position:absolute;top:10px;right:12px;color:#ccc;font-size:15px;cursor:pointer}.del.sure{color:#ef4444;font-weight:700;white-space:nowrap;background:#fef2f2;border-radius:8px;padding:2px 8px}.del:hover{color:#ef4444}
+/* 用户胶囊（右上角） */
+.userchip{display:flex;align-items:center;gap:8px;cursor:pointer;border:1px solid var(--line);border-radius:99px;padding:4px 14px 4px 5px;background:var(--card);font-size:13px;font-weight:600;color:var(--ink);white-space:nowrap}
+.userchip:hover{border-color:var(--accent);color:var(--accent)}
+.userchip img{width:28px;height:28px;border-radius:50%;object-fit:cover}
+.userchip .uava{width:28px;height:28px;border-radius:50%;background:var(--accent2);color:var(--accent);display:flex;align-items:center;justify-content:center;font-size:13px}
+.bookLink{cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px}
+.bookLink:hover{color:var(--accent)}
 </style>
 </head>
 <body>
@@ -126,7 +133,7 @@ window.addEventListener('unhandledrejection', function(e){
     <button data-tab="square">广场</button>
     <button data-tab="chat">问收藏</button>
     <button data-tab="ext">插件</button>
-  </nav><span class="badge" id="userBadge" style="display:none"></span>
+  </nav><div class="userchip" id="userChip" style="display:none" onclick="showProfile()" title="个人主页"></div>
 </header>
 <main>
   <div class="hero">
@@ -297,6 +304,29 @@ function visibleItems(){
     (i.tags||[]).some(t=>t.toLowerCase().includes(kw)));
   return list;
 }
+// ---------- 统一卡片：收藏夹 / 书架详情 / 广场共用同一布局 ----------
+function cardShell(it, o){
+  const tags = Array.isArray(it.tags) ? it.tags : (function(){ try{ return JSON.parse(it.tags||'[]'); }catch(e){ return []; } })();
+  return `
+    ${o.del?`<div class="del" onclick="event.stopPropagation();delClick(this,${it.id})">×</div>`:''}
+    ${o.reco?`<div class="reco">💬 ${esc(o.recoName||'同学')}：${esc(o.reco)}</div>`:''}
+    <h3>${esc(it.title)}</h3>
+    <div class="one">${esc(it.one_sentence)}</div>
+    <div class="tags">${tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>
+    ${o.hot?`<div class="hotc clamp3">🔥 ${esc(o.hot)}</div>`:''}
+    <div class="meta">
+      ${o.owner?`<span>👤 ${esc(o.owner)}</span>`:''}
+      <span>约 ${it.minutes} 分钟</span>
+      ${o.folder?`<span>📁 ${esc(o.folder)}</span>`:''}
+      ${o.book?`<span class="bookLink" onclick="event.stopPropagation();goBook(${o.book.id})" title="查看这本书的全部公开资料">📖 ${esc(o.book.title)}</span>`:''}
+      ${o.comments?`<span>💬 ${o.comments}</span>`:''}
+      ${o.recoBtn?`<span class="recoBtn" onclick="event.stopPropagation();openRecommend(${it.id})">📢 推荐</span>`:''}
+    </div>`;
+}
+function goBook(id){
+  document.querySelector('nav button[data-tab="shelf"]').click();
+  openBook(id);
+}
 function renderItems(){
   const g = $('itemGrid'); const items = visibleItems();
   g.innerHTML = items.length ? '' : '<div class="empty" style="grid-column:1/-1">' + (($('searchBox')&&$('searchBox').value.trim()) ? '没有匹配的收藏，换个关键词试试' : '这里还空空的，先收藏一篇文章吧') + '</div>';
@@ -305,13 +335,15 @@ function renderItems(){
     const folder = S.folders.find(f=>f.id===it.folder_id);
     const card = document.createElement('div'); card.className='card';
     card.onclick = ()=>openItem(it.id);
-    card.innerHTML = `
-      <div class="del" onclick="event.stopPropagation();delClick(this,${it.id})">×</div>
-      <h3>${esc(it.title)}</h3>
-      <div class="one">${esc(it.one_sentence)}</div>
-      <div class="tags">${it.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>
-      ${it.recommend_note?`<div class="reco">💬 ${esc(it.author_name||'同学')}：${esc(it.recommend_note)}</div>`:''}
-      <div class="meta"><span>约 ${it.minutes} 分钟</span>${folder?`<span>📁 ${esc(folder.name)}</span>`:''}${book?`<span>📖 ${esc(book.title)}</span>`:''}${(S.comments||[]).some(cc=>cc.item_id===it.id)?`<span>💬 ${(S.comments||[]).filter(cc=>cc.item_id===it.id).length}</span>`:''}<span class="recoBtn" onclick="event.stopPropagation();openRecommend(${it.id})">📢 推荐</span></div>`;
+    card.innerHTML = cardShell(it, {
+      del: true,
+      folder: folder ? folder.name : null,
+      book: book ? { id: book.id, title: book.title } : null,
+      comments: (S.comments||[]).filter(c=>c.item_id===it.id).length,
+      reco: it.recommend_note || null,
+      recoName: it.author_name || '同学',
+      recoBtn: true
+    });
     g.appendChild(card);
   }
 }
@@ -381,32 +413,52 @@ async function postComment(id){
   await refresh(); openItem(id);
 }
 
-// ---------- books ----------
+// ---------- books（书名全局共享，同名自动归一，公开资料互通） ----------
 async function addBook(){
   const title = $('bookTitle').value.trim(); if(!title) return toast('输入书名');
-  await api('books','POST',{title}); $('bookTitle').value=''; refresh();
+  const btn = document.querySelector('#tab-shelf .btn'); if (btn) { btn.disabled = true; btn.textContent = 'AI 校验书名…'; }
+  try {
+    const d = await api('books','POST',{title});
+    $('bookTitle').value='';
+    await refresh();
+    if (!d.created) toast('书库里已有《'+(d.title||title)+'》，已自动归到同一本');
+    else if (d.ai) toast('AI 已确认《'+(d.title||title)+'》');
+    openBook(d.id);
+  } catch(e){ toast(e.message); }
+  if (btn) { btn.disabled = false; btn.textContent = '建一本书'; }
 }
 function renderBooks(){
   const g = $('bookGrid');
   g.innerHTML = S.books.length ? '' : '<div class="empty" style="grid-column:1/-1">还没有书，建一本开始聚合资料</div>';
   for (const b of S.books){
-    const n = S.items.filter(i=>i.book_id===b.id).length;
     const card = document.createElement('div'); card.className='card bookcard';
     card.onclick = ()=>openBook(b.id);
-    card.innerHTML = `<h3>📖 ${esc(b.title)}</h3><p>${esc(b.author||'')}${b.author?' · ':''}${n} 篇相关资料</p>`;
+    const parts = [];
+    if (b.author) parts.push(esc(b.author));
+    parts.push('我的资料 ' + (b.my_items != null ? b.my_items : S.items.filter(i=>i.book_id===b.id).length) + ' 篇');
+    if (b.readers && b.readers > 1) parts.push(b.readers + ' 人在读');
+    card.innerHTML = `<h3>📖 ${esc(b.title)}</h3><p>${parts.join(' · ')}</p>`;
     g.appendChild(card);
   }
 }
-function openBook(id){
-  const b = S.books.find(x=>x.id===id);
-  const items = S.items.filter(i=>i.book_id===id);
+async function openBook(id){
+  let d;
+  try { d = await api('books/'+id); } catch(e){ toast(e.message||'无法打开'); return; }
+  const b = d.book;
+  const cards = arr => arr.map(it=>{
+    const tags = Array.isArray(it.tags)?it.tags:[];
+    return `<div class="card" onclick="openItem(${it.id})"><h3>${esc(it.title)}</h3><div class="one">${esc(it.one_sentence)}</div>
+      <div class="tags">${tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>
+      <div class="meta"><span>约 ${it.minutes} 分钟</span>${it.owner_name?`<span>👤 ${esc(it.owner_name)}</span>`:''}</div></div>`;
+  }).join('');
   $('bookDetail').innerHTML = `
-    <div class="section">《${esc(b.title)}》 · ${items.length} 篇资料</div>
+    <div class="section">《${esc(b.title)}》</div>
+    <p class="hint" style="margin:6px 0 2px">${esc(b.author||'')}${b.author?' · ':''}${d.readers} 人在读 · 我的资料 ${d.mine.length} 篇 · 同学公开资料 ${d.others.length} 篇</p>
     <p class="hint" style="margin-bottom:8px">${esc(b.note||'')}</p>
-    <div class="grid">${items.map(it=>`
-      <div class="card" onclick="openItem(${it.id})"><h3>${esc(it.title)}</h3><div class="one">${esc(it.one_sentence)}</div>
-      <div class="tags">${it.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div></div>`).join('')
-      || '<div class="empty">这本书下还没有资料，收藏文章后在详情里挂到这本书下</div>'}</div>`;
+    <div class="section" style="font-size:14px;margin-top:16px">我的资料</div>
+    <div class="grid">${d.mine.length ? cards(d.mine) : '<div class="empty" style="grid-column:1/-1">这本书下还没有你的资料，收藏文章后在详情里挂到这本书下</div>'}</div>
+    <div class="section" style="font-size:14px">其他同学的公开资料</div>
+    <div class="grid">${d.others.length ? cards(d.others) : '<div class="empty" style="grid-column:1/-1">暂无其他同学的公开资料</div>'}</div>`;
   $('bookDetail').scrollIntoView({behavior:'smooth'});
 }
 
@@ -425,12 +477,14 @@ function renderSquare(){
     const mine = S.items.some(x=>x.id===it.id);
     const card = document.createElement('div'); card.className='card';
     card.onclick = ()=>openItem(it.id);
-    card.innerHTML = `
-      <div class="reco">💬 ${esc(it.author_name||it.owner||'同学')}：${esc(it.recommend_note||'觉得不错，分享给大家')}</div>
-      <h3>${esc(it.title)}</h3>
-      <div class="one">${esc(it.one_sentence)}</div>
-      ${it.hot_comment ? `<div class="hotc clamp3">🔥 ${esc(it.hot_comment)}</div>` : ''}
-      <div class="meta"><span>👤 ${esc(it.owner||'同学')}${mine?'（你）':''}</span><span>💬 ${it.comment_count||0} 条讨论</span><span>约 ${it.minutes} 分钟</span></div>`;
+    card.innerHTML = cardShell(it, {
+      reco: it.recommend_note || '觉得不错，分享给大家',
+      recoName: it.author_name || it.owner || '同学',
+      hot: it.hot_comment || null,
+      owner: (it.owner || '同学') + (mine ? '（你）' : ''),
+      book: it.book_id ? { id: it.book_id, title: it.book_title } : null,
+      comments: it.comment_count || 0
+    });
     g.appendChild(card);
   }
 }
@@ -525,13 +579,18 @@ async function sendChat(){
 $('chatInput').addEventListener('keydown', e => { if(e.key==='Enter') sendChat(); });
 
 // ---------- auth ----------
+let ME = null;
+function renderUserChip(me){
+  const name = me.nickname || me.username || '同学';
+  $('userChip').innerHTML = (me.avatar ? `<img src="${esc(me.avatar)}" alt="">` : `<span class="uava">${esc(name.slice(0,1).toUpperCase())}</span>`) + `<span>${esc(name)}</span>`;
+  $('userChip').style.display = 'flex';
+}
 let registering = false;
 function showAuth(){ $('authMask').classList.add('show'); }
 async function boot(){
   try {
     const me = await api('me');
-    $('userBadge').textContent = '👋 ' + me.username;
-    $('userBadge').style.display = '';
+    ME = me; renderUserChip(me);
     chatKey = 'shiy_chat_' + me.username;
     loadChatHistory();
     await refresh();
@@ -582,7 +641,7 @@ async function saveProfile(){
     await api('profile','PATCH',{ nickname: $('pNick').value.trim(), bio: $('pBio').value });
     toast('资料已保存');
     const me = await api('me');
-    $('userBadge').textContent = '👤 ' + (me.nickname||me.username);
+    ME = me; renderUserChip(me);
   } catch(e){ toast(e.message); }
 }
 async function uploadAvatar(input){
@@ -593,6 +652,7 @@ async function uploadAvatar(input){
     try {
       await api('profile','PATCH',{ avatar: reader.result });
       $('pAva').src = reader.result; toast('头像已更新');
+      ME = Object.assign({}, ME, { avatar: reader.result }); renderUserChip(ME);
     } catch(e){ toast(e.message); }
   };
   reader.readAsDataURL(f);
