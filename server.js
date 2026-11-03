@@ -175,22 +175,36 @@ function chunkText(text, size = 500, overlap = 80) {
   return chunks.map((c, i) => ({ idx: i, text: c })).filter(c => c.text.length > 30);
 }
 
+const STOPWORDS = new Set(['的','了','吗','呢','吧','啊','是','在','和','与','对','把','我','有','就','都','不','这','那','你','他','她','它','什么','怎么','为什么','如何','关于','介绍','帮忙','帮我','看看','一下','哪些','以及','还有','因为','所以','但是','因此','可以','应该','需要','大家','所有','这个','那个','里面','时候','问题','内容','文章','收藏','整理','讲讲','说说']);
 function terms(q) {
   const set = new Set();
-  for (const w of q.split(/[\s，。？！、；："（）\[\]{}?!,:;()]+/)) if (w.length >= 2) set.add(w);
+  for (const w of q.split(/[\s，。？！、；：“”（）\[\]{}?!,:;()]+/)) if (w.length >= 2 && !STOPWORDS.has(w)) set.add(w);
   const cjk = q.match(/[\u4e00-\u9fff]/g);
   if (cjk && cjk.length >= 2) {
     const s = cjk.join('');
     for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
   }
-  return [...set];
+  return [...set].filter(t => !STOPWORDS.has(t));
 }
-function retrieve(question, userId, k = 6) {
-  const ts = terms(question);
+// AI 提取检索关键词（失败则退回原问题分词）
+async function extractKeywords(q) {
+  try {
+    const out = await llm([
+      { role: 'system', content: '把用户问题改写成适合在文章库中检索的关键词。只返回 JSON：{"keywords":["3-6个关键词条，去掉虚词"]}' },
+      { role: 'user', content: q }
+    ], true);
+    const kws = JSON.parse(out).keywords;
+    if (Array.isArray(kws)) return kws.map(String).filter(s => s.length >= 2);
+  } catch (e) {}
+  return null;
+}
+function retrieve(question, userId, k = 6, kws) {
+  const ts = kws && kws.length ? [...new Set(kws.flatMap(w => terms(w)).concat(terms(question)))] : terms(question);
   const rows = db.prepare('SELECT c.item_id, c.idx, c.text, i.title FROM chunks c JOIN items i ON i.id = c.item_id WHERE i.user_id = ?').all(userId);
   const scored = rows.map(r => {
     let score = 0;
     for (const t of ts) {
+      if (r.title && r.title.includes(t)) score += 5 * t.length; // 标题命中加权
       let i = -1, n = 0;
       while ((i = r.text.indexOf(t, i + 1)) !== -1 && n < 20) n++;
       score += n * t.length;
@@ -480,7 +494,8 @@ async function handleApi(req, res, pathname, query) {
     const b = await readBody(req);
     const q = String(b.question || '').trim();
     if (!q) return json(res, 400, { error: '请输入问题' });
-    const hits = retrieve(q, me);
+    const kws = await extractKeywords(q);
+    const hits = retrieve(q, me, 6, kws);
     if (!hits.length) return json(res, 200, { answer: '你的收藏库里暂时没有和这个问题相关的内容。先收藏几篇文章再来问我吧。', sources: [] });
     const byItem = new Map();
     for (const h of hits) {
