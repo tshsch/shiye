@@ -63,12 +63,12 @@ select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size
 .bubble.me{align-self:flex-end;background:var(--accent);color:#fff}
 .bubble.ai{align-self:flex-start;background:#fbfaf8;border:1px solid var(--line)}
 .src{font-size:12px;color:var(--sub);margin-top:8px;border-top:1px dashed var(--line);padding-top:8px}
-.srcList{margin-top:10px;border-top:1px dashed var(--line);padding-top:8px;display:flex;flex-direction:column;gap:8px}
-.srcTitle{font-size:12px;color:var(--sub)}
-.srcCard{border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px;cursor:pointer;background:#fff}
-.srcCard:hover{border-color:var(--accent);box-shadow:0 2px 8px rgba(0,0,0,.06)}
-.srcCard b{font-size:13px}
-.srcCard .snippet{font-size:12px;color:var(--sub);margin-top:4px;line-height:1.5}
+.srcList{margin-top:8px;border-top:1px dashed var(--line);padding-top:6px;display:flex;flex-direction:column;gap:4px;max-height:172px;overflow:auto}
+.srcTitle{font-size:11px;color:var(--sub)}
+.srcCard{border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:12px;line-height:1.4;cursor:pointer;background:#fff;display:flex;gap:8px;align-items:baseline}
+.srcCard:hover{border-color:var(--accent);background:#fafaf7}
+.srcCard b{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.srcCard .snippet{font-size:11px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
 sup.cite{color:var(--accent);cursor:pointer;font-weight:700;margin:0 2px}
 .srcCard.flash{border-color:var(--accent);background:#fffbeb}
 .chipinput{display:flex;gap:10px}
