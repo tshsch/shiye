@@ -1,9 +1,17 @@
 {
   "manifest_version": 3,
   "name": "拾页收藏助手",
-  "version": "1.1",
+  "version": "1.2",
   "description": "一键把当前网页收进拾页，AI 自动生成导读并归类",
-  "permissions": ["activeTab", "scripting"],
-  "host_permissions": ["http://localhost:3000/*", "http://43.138.186.196/*"],
-  "action": { "default_popup": "popup.html" }
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "http://43.138.186.196/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
 }

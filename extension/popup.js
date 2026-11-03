@@ -39,9 +39,16 @@ async function init() {
     }
     const [r] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: () => ({ title: document.title, text: document.body ? document.body.innerText.slice(0, 16000) : "" })
+      func: () => {
+        const el = document.querySelector('article') || document.querySelector('main') || document.body;
+        return {
+          title: document.title,
+          text: document.body ? document.body.innerText.slice(0, 16000) : "",
+          html: el ? el.innerHTML.slice(0, 60000) : ""
+        };
+      }
     });
-    page = { url: tab.url, title: r.result.title, text: r.result.text };
+    page = { url: tab.url, title: r.result.title, text: r.result.text, html: r.result.html };
     $("title").textContent = r.result.title || tab.url;
     if ((r.result.text || "").trim().length < 30) {
       $("err").style.display = "block";
@@ -93,7 +100,7 @@ $("save").onclick = async () => {
     const r = await fetch(API + "/items", {
       method: "POST", credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: page.url, title: page.title, text: page.text, folder_id: $("folder").value ? Number($("folder").value) : null })
+      body: JSON.stringify({ url: page.url, title: page.title, text: page.text, html: page.html, folder_id: $("folder").value ? Number($("folder").value) : null })
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || "收藏失败");

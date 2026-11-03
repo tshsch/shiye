@@ -147,6 +147,11 @@ async function extractFromUrl(url) {
   let html = new TextDecoder('utf-8', { fatal: false }).decode(await r.arrayBuffer());
   const t = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   const title = t ? t[1].replace(/\s+/g, ' ').trim().slice(0, 120) : '';
+  return { title, text: htmlToText(html) };
+}
+
+// HTML -> 干净正文：去脚本样式导航、正文容器优先、垃圾行过滤（服务器抓取与插件上传共用）
+function htmlToText(html) {
   html = html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<nav[\s\S]*?<\/nav>/gi, ' ').replace(/<header[\s\S]*?<\/header>/gi, ' ')
@@ -157,7 +162,12 @@ async function extractFromUrl(url) {
     .replace(/<[^>]+>/g, '')
     .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
     .split('\n').map(s => s.trim()).filter(s => s.length > 1 && !isJunkLine(s)).join('\n').replace(/\n{3,}/g, '\n\n');
-  return { title, text: text.slice(0, 16000) };
+  return text.slice(0, 16000);
+}
+
+// 纯文本（手动粘贴）也过一遍垃圾行过滤
+function cleanPlainText(s) {
+  return s.trim().split('\n').map(x => x.trim()).filter(x => x.length > 1 && !isJunkLine(x)).join('\n').slice(0, 16000);
 }
 
 function analyzePrompt(title, text) {
@@ -401,10 +411,13 @@ async function handleApi(req, res, pathname, query) {
           const ext = await extractFromUrl(url);
           if (ext.text && ext.text.length >= 200) { title = ext.title || title; text = ext.text; }
         } catch (e) { /* 回退到客户端正文 */ }
-        if (!text && b.text && b.text.trim().length > 30) text = b.text.trim().slice(0, 16000);
+        if (!text && b.html && String(b.html).length > 500) {
+          try { const t2 = htmlToText(String(b.html)); if (t2.length >= 200) text = t2; } catch (e) {}
+        }
+        if (!text && b.text && b.text.trim().length > 30) text = cleanPlainText(b.text);
         if (!text) return json(res, 422, { error: '该网页抓取失败（可能有登录墙），请去主页手动粘贴正文' });
       } else if (b.text && b.text.trim().length > 30) {
-        text = b.text.trim().slice(0, 16000);
+        text = cleanPlainText(b.text);
       } else {
         return json(res, 400, { error: '请提供链接或至少30字的正文' });
       }
