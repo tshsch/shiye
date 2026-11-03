@@ -436,8 +436,8 @@ async function addBook(){
     const d = await api('books','POST',{title});
     $('bookTitle').value='';
     await refresh();
-    if (!d.created) toast('书库里已有《'+(d.title||title)+'》，已自动归到同一本');
-    else if (d.ai) toast('AI 已确认《'+(d.title||title)+'》');
+    if (!d.created) toast('书库里已有《'+(d.title||title)+'》，已加入你的书架');
+    else if (d.ai) toast('AI 已确认《'+(d.title||title)+'》并加入书架');
     openBook(d.id);
   } catch(e){ toast(e.message); }
   if (btn) { btn.disabled = false; btn.textContent = '建一本书'; }
@@ -456,10 +456,18 @@ function renderBooks(){
     g.appendChild(card);
   }
 }
+async function subscribeBook(id){
+  try {
+    await api('books/'+id+'/subscribe','POST',{});
+    await refresh(); openBook(id); toast('已加入你的书架，可以把收藏挂上去了');
+  } catch(e){ toast(e.message); }
+}
 async function openBook(id){
   let d;
   try { d = await api('books/'+id); } catch(e){ toast(e.message||'无法打开'); return; }
   const b = d.book;
+  const inShelf = S.books.some(x=>x.id===Number(id));
+  const subBtn = inShelf ? '' : ' <button class="btn small" onclick="subscribeBook('+Number(id)+')">➕ 加入我的书架</button>';
   const cards = arr => arr.map(it=>{
     const tags = Array.isArray(it.tags)?it.tags:[];
     return `<div class="card" onclick="openItem(${it.id})"><h3>${esc(it.title)}</h3><div class="one">${esc(it.one_sentence)}</div>
@@ -467,7 +475,7 @@ async function openBook(id){
       <div class="meta"><span>约 ${it.minutes} 分钟</span>${it.owner_name?`<span>👤 ${esc(it.owner_name)}</span>`:''}</div></div>`;
   }).join('');
   $('bookDetail').innerHTML = `
-    <div class="section">《${esc(b.title)}》</div>
+    <div class="section">《${esc(b.title)}》${subBtn}</div>
     <p class="hint" style="margin:6px 0 2px">${esc(b.author||'')}${b.author?' · ':''}${d.readers} 人在读 · 我的资料 ${d.mine.length} 篇 · 同学公开资料 ${d.others.length} 篇</p>
     <p class="hint" style="margin-bottom:8px">${esc(b.note||'')}</p>
     <div class="section" style="font-size:14px;margin-top:16px">我的资料</div>
@@ -563,14 +571,15 @@ function loadChatHistory(){
   let arr=[]; try{ arr=JSON.parse(localStorage.getItem(chatKey)||'[]'); }catch(e){}
   const log = $('chatLog');
   for(const m of arr){
-    log.insertAdjacentHTML('beforeend', `<div class="bubble me">${esc(m.q)}</div><div class="bubble ai">${renderAnswer(m.answer)}${srcListHtml(m.sources||[])}</div>`);
+    const msteps = m.steps && m.steps.length ? '<div class="srcTitle" style="margin-top:6px">🤖 检索轨迹：' + esc(m.steps.join(' → ')) + '</div>' : '';
+    log.insertAdjacentHTML('beforeend', `<div class="bubble me">${esc(m.q)}</div><div class="bubble ai">${renderAnswer(m.answer)}${srcListHtml(m.sources||[])}${msteps}</div>`);
   }
   if(arr.length) log.scrollTop = log.scrollHeight;
 }
-function saveChat(q, answer, sources){
+function saveChat(q, answer, sources, steps){
   if(!chatKey) return;
   let arr=[]; try{ arr=JSON.parse(localStorage.getItem(chatKey)||'[]'); }catch(e){}
-  arr.push({q, answer, sources});
+  arr.push({q, answer, sources, steps});
   while(arr.length>30) arr.shift();
   try{ localStorage.setItem(chatKey, JSON.stringify(arr)); }catch(e){}
 }
@@ -586,8 +595,9 @@ async function sendChat(){
   log.scrollTop = log.scrollHeight;
   try {
     const d = await api('chat','POST',{question:q});
-    $('pending').outerHTML = `<div class="bubble ai">${renderAnswer(d.answer)}${srcListHtml(d.sources)}</div>`;
-    saveChat(q, d.answer, d.sources||[]);
+    const steps = d.steps && d.steps.length ? '<div class="srcTitle" style="margin-top:6px">🤖 检索轨迹：' + esc(d.steps.join(' → ')) + '</div>' : '';
+    $('pending').outerHTML = `<div class="bubble ai">${renderAnswer(d.answer)}${srcListHtml(d.sources)}${steps}</div>`;
+    saveChat(q, d.answer, d.sources||[], d.steps||[]);
   } catch(e){ $('pending').outerHTML = `<div class="bubble ai">出错了：${esc(e.message)}</div>`; }
   log.scrollTop = log.scrollHeight;
 }

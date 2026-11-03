@@ -73,6 +73,7 @@ try { db.exec("ALTER TABLE users ADD COLUMN nickname TEXT DEFAULT ''"); } catch 
 try { db.exec("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''"); } catch (e) {}
 try { db.exec("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ''"); } catch (e) {}
 try { db.exec("ALTER TABLE items ADD COLUMN agent_log TEXT DEFAULT ''"); } catch (e) {}
+db.exec('CREATE TABLE IF NOT EXISTS book_subs(user_id INTEGER NOT NULL, book_id INTEGER NOT NULL, PRIMARY KEY(user_id,book_id));');
 db.exec('CREATE INDEX IF NOT EXISTS idx_items_user ON items(user_id); CREATE INDEX IF NOT EXISTS idx_chunks_item ON chunks(item_id);');
 
 // ---------- books 全局共享：规范书名去重（同名书合并为一本） ----------
@@ -507,6 +508,80 @@ async function organizeItem(itemId, userId) {
   return { actions, note };
 }
 
+// ---------- 问答智能体：多轮检索循环（模型自主决定检索/深读/作答） ----------
+const CHAT_TOOLS = [
+  { type: 'function', function: { name: 'search_library', description: '在用户的收藏库中检索相关片段。结果不足时换关键词再检索', parameters: { type: 'object', properties: { query: { type: 'string', description: '检索关键词或短语' } }, required: ['query'] } } },
+  { type: 'function', function: { name: 'read_item', description: '深读某篇收藏的完整正文（id 来自检索结果）', parameters: { type: 'object', properties: { item_id: { type: 'integer' } }, required: ['item_id'] } } },
+  { type: 'function', function: { name: 'finish', description: '证据足够，提交最终回答', parameters: { type: 'object', properties: { answer: { type: 'string', description: '中文回答，引用证据时在句末标注[编号]' } }, required: ['answer'] } } }
+];
+
+async function chatAgent(userId, q) {
+  const evidence = [];
+  const steps = [];
+  const execTool = async (name, args) => {
+    if (name === 'search_library') {
+      const query = String(args.query || '').trim();
+      if (!query) return { error: '检索词为空' };
+      steps.push('🔍 检索「' + query.slice(0, 20) + '」');
+      const hits = retrieve(query, userId, 8);
+      if (!hits.length) return { result: '没有命中任何片段。建议换更具体的关键词，或换个角度检索。' };
+      const out = [];
+      for (const h of hits) {
+        if (evidence.some(e => e.item_id === h.item_id && e.text === h.text)) continue;
+        const n = evidence.length + 1;
+        evidence.push({ n, item_id: h.item_id, title: h.title, snippet: h.text.slice(0, 150), text: h.text });
+        out.push('[' + n + '] 《' + h.title + '》' + h.text.slice(0, 300));
+      }
+      if (!out.length) return { result: '命中的片段都已读过。可对其中某篇调用 read_item 深读，或调用 finish 作答。' };
+      return { evidence: out };
+    }
+    if (name === 'read_item') {
+      const it = db.prepare('SELECT id, title, content FROM items WHERE id=? AND user_id=?').get(Number(args.item_id), userId);
+      if (!it) return { error: '找不到该收藏' };
+      steps.push('📖 深读《' + it.title + '》');
+      return { title: it.title, content: String(it.content || '').slice(0, 4000) };
+    }
+    if (name === 'finish') return { ok: true, answer: String(args.answer || '') };
+    return { error: '未知工具' };
+  };
+  const sys = '你是用户个人收藏库的问答智能体。通过工具多轮检索自己的收藏来回答问题：先 search_library 检索；若片段不足以回答，就换关键词再检索，或用 read_item 深读相关文章；证据足够后调用 finish，用中文简洁分点作答，引用证据时在句末标注编号如[1][3]。如果两轮检索都没有相关内容，直接 finish 说明收藏库里暂时没有相关内容。';
+  const msgs = [
+    { role: 'system', content: sys },
+    { role: 'user', content: '问题：' + q }
+  ];
+  let answer = null;
+  for (let step = 0; step < 6; step++) {
+    let msg;
+    try { msg = await llmMsg(msgs, CHAT_TOOLS); } catch (e) { break; }
+    if (!msg) break;
+    msgs.push(msg);
+    const calls = msg.tool_calls || [];
+    if (!calls.length) { answer = msg.content || null; break; }
+    let finished = false;
+    for (const tc of calls) {
+      let args = {};
+      try { args = JSON.parse(tc.function.arguments || '{}'); } catch (e) {}
+      let result;
+      try { result = await execTool(tc.function.name, args); } catch (e) { result = { error: String(e.message || e) }; }
+      if (tc.function.name === 'finish') { answer = (result && result.answer) || null; finished = true; }
+      msgs.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 4000) });
+    }
+    if (finished) break;
+  }
+  if (!answer) {
+    // 循环用尽仍未 finish：把已有证据交给模型做最后一次总结
+    try {
+      const m2 = await llmMsg(msgs.concat([{ role: 'user', content: '请直接根据以上证据回答最初的问题：' + q + '。引用证据标注[编号]。' }]), null);
+      answer = m2 && m2.content ? m2.content : null;
+    } catch (e) { answer = null; }
+  }
+  if (!answer) answer = '你的收藏库里暂时没有和这个问题相关的内容。先收藏几篇文章再来问我吧。';
+  const cited = [...new Set((answer.match(/\[(\d{1,2})\]/g) || []).map(s => Number(s.slice(1, -1))))].filter(n => evidence.some(e => e.n === n)).sort((a, b) => a - b);
+  let sources = cited.map(n => { const e = evidence.find(x => x.n === n); return { n: e.n, item_id: e.item_id, title: e.title, snippet: e.snippet }; });
+  if (!sources.length && evidence.length) sources = evidence.slice(0, 3).map(e => ({ n: e.n, item_id: e.item_id, title: e.title, snippet: e.snippet }));
+  return { answer, sources, steps };
+}
+
 function itemRow(r) { return { ...r, tags: JSON.parse(r.tags || '[]') }; }
 
 async function handleApi(req, res, pathname, query) {
@@ -555,12 +630,14 @@ async function handleApi(req, res, pathname, query) {
 
   if (method === 'GET' && pathname === '/api/state') {
     const folders = db.prepare('SELECT * FROM folders WHERE user_id=? ORDER BY id').all(me);
-    // 书全局共享：我的书架 = 我创建的 + 我挂过资料的书
+    // 书全局共享：我的书架 = 我创建的 + 我订阅的 + 我挂过资料的书
     const books = db.prepare(`SELECT b.*,
+      EXISTS(SELECT 1 FROM book_subs s WHERE s.book_id=b.id AND s.user_id=?) AS subscribed,
       (SELECT COUNT(*) FROM items i WHERE i.book_id=b.id AND i.user_id=?) AS my_items,
       (SELECT COUNT(DISTINCT i2.user_id) FROM items i2 WHERE i2.book_id=b.id) AS readers
-      FROM books b WHERE b.user_id=? OR EXISTS(SELECT 1 FROM items i3 WHERE i3.book_id=b.id AND i3.user_id=?)
-      ORDER BY b.id`).all(me, me, me);
+      FROM books b WHERE b.user_id=? OR EXISTS(SELECT 1 FROM book_subs s2 WHERE s2.book_id=b.id AND s2.user_id=?)
+        OR EXISTS(SELECT 1 FROM items i3 WHERE i3.book_id=b.id AND i3.user_id=?)
+      ORDER BY b.id`).all(me, me, me, me, me);
     const items = db.prepare('SELECT * FROM items WHERE user_id=? ORDER BY id DESC').all(me).map(itemRow);
     // 评论跨用户展示（条目自己的评论 + 书籍讨论聚合在前端做）
     const mine = items.map(i => i.id);
@@ -596,7 +673,17 @@ async function handleApi(req, res, pathname, query) {
     const b = await readBody(req);
     const r = await resolveBook(me, b.title, b.author, b.note);
     if (r.error) return json(res, r.error.indexOf('不像一本书名') !== -1 ? 422 : 400, { error: r.error });
-    return json(res, 200, { id: r.book.id, title: r.book.title, created: r.created, ai: r.ai });
+    db.prepare('INSERT OR IGNORE INTO book_subs(user_id,book_id) VALUES(?,?)').run(me, r.book.id);
+    return json(res, 200, { id: r.book.id, title: r.book.title, created: r.created, ai: r.ai, subscribed: true });
+  }
+
+  // 订阅一本已有书（加入我的书架）
+  const sm = pathname.match(/^\/api\/books\/(\d+)\/subscribe$/);
+  if (method === 'POST' && sm) {
+    const book = db.prepare('SELECT * FROM books WHERE id=?').get(Number(sm[1]));
+    if (!book) return json(res, 404, { error: 'not found' });
+    db.prepare('INSERT OR IGNORE INTO book_subs(user_id,book_id) VALUES(?,?)').run(me, book.id);
+    return json(res, 200, { ok: true });
   }
 
   // 书籍详情（公开）：我的资料 + 其他同学的公开资料
@@ -750,36 +837,15 @@ async function handleApi(req, res, pathname, query) {
     const b = await readBody(req);
     const q = String(b.question || '').trim();
     if (!q) return json(res, 400, { error: '请输入问题' });
-    const kws = await extractKeywords(q);
-    const hits = retrieve(q, me, 6, kws);
-    if (!hits.length) return json(res, 200, { answer: '你的收藏库里暂时没有和这个问题相关的内容。先收藏几篇文章再来问我吧。', sources: [] });
-    const byItem = new Map();
-    for (const h of hits) {
-      if (!byItem.has(h.item_id)) byItem.set(h.item_id, []);
-      byItem.get(h.item_id).push(h);
+    if (!LLM_KEY) {
+      // 演示模式：单轮检索兜底
+      const kws = await extractKeywords(q);
+      const hits = retrieve(q, me, 6, kws);
+      if (!hits.length) return json(res, 200, { answer: '你的收藏库里暂时没有和这个问题相关的内容。先收藏几篇文章再来问我吧。', sources: [] });
+      return json(res, 200, { answer: '【演示模式】根据你的收藏，最相关的内容是：\n\n' + hits.slice(0, 3).map(h => '· 《' + h.title + '》' + h.text.slice(0, 80) + '……').join('\n'), sources: hits.slice(0, 3).map((h, i) => ({ n: i + 1, item_id: h.item_id, title: h.title, snippet: h.text.slice(0, 120) })) });
     }
-    const context = []; const sourceList = [];
-    let n = 1;
-    for (const [itemId, hs] of byItem) {
-      let cited = false;
-      for (const h of hs) {
-        context.push('[' + n + '] ' + h.title + '：' + h.text);
-        if (!cited) sourceList.push({ n, item_id: itemId, title: h.title, snippet: h.text.slice(0, 120) });
-        cited = true;
-        n++;
-      }
-    }
-    let answer = null;
-    try {
-      answer = await llm([
-        { role: 'system', content: '你是用户个人收藏库的问答助手。只根据提供的收藏片段回答问题，回答末尾标注引用编号如[1][3]。如果片段不足以回答，就明确说不确定。用中文，简洁分点。' },
-        { role: 'user', content: '我的收藏片段：\n\n' + context.join('\n\n') + '\n\n问题：' + q }
-      ], false);
-    } catch (e) { answer = null; }
-    if (!answer) {
-      answer = '【演示模式】根据你的收藏，最相关的内容是：\n\n' + hits.slice(0, 3).map(h => '· 《' + h.title + '》' + h.text.slice(0, 80) + '……').join('\n');
-    }
-    return json(res, 200, { answer, sources: sourceList });
+    const r = await chatAgent(me, q);
+    return json(res, 200, { answer: r.answer, sources: r.sources, steps: r.steps });
   }
 
   return json(res, 404, { error: 'not found' });
