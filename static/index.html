@@ -63,6 +63,14 @@ select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size
 .bubble.me{align-self:flex-end;background:var(--accent);color:#fff}
 .bubble.ai{align-self:flex-start;background:#fbfaf8;border:1px solid var(--line)}
 .src{font-size:12px;color:var(--sub);margin-top:8px;border-top:1px dashed var(--line);padding-top:8px}
+.srcList{margin-top:10px;border-top:1px dashed var(--line);padding-top:8px;display:flex;flex-direction:column;gap:8px}
+.srcTitle{font-size:12px;color:var(--sub)}
+.srcCard{border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px;cursor:pointer;background:#fff}
+.srcCard:hover{border-color:var(--accent);box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.srcCard b{font-size:13px}
+.srcCard .snippet{font-size:12px;color:var(--sub);margin-top:4px;line-height:1.5}
+sup.cite{color:var(--accent);cursor:pointer;font-weight:700;margin:0 2px}
+.srcCard.flash{border-color:var(--accent);background:#fffbeb}
 .chipinput{display:flex;gap:10px}
 .chipinput input{flex:1;border:1px solid var(--line);border-radius:12px;padding:13px 16px;font-size:14px;outline:none}
 .suggest{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
@@ -432,6 +440,26 @@ async function submitRecommend(){
 }
 
 // ---------- chat ----------
+// 问答引用渲染：编号徽章可点击跳转，引用卡片可点击打开原收藏
+function renderAnswer(text){
+  return esc(text).replace(/\[(\d{1,2})\]/g, (m,n)=>`<sup class="cite" onclick="jumpSource(${n})" title="查看引用来源">${n}</sup>`);
+}
+function srcListHtml(sources){
+  if(!sources||!sources.length) return '';
+  const cards = sources.map(s=>`
+    <div class="srcCard" id="src-${s.n}" onclick="openItem(${s.item_id})" title="点击打开原文">
+      <b>[${s.n}] ${esc(s.title)}</b>
+      <div class="snippet">${esc(s.snippet)}……</div>
+    </div>`).join('');
+  return `<div class="srcList"><div class="srcTitle">引用来源（点击打开）</div>${cards}</div>`;
+}
+function jumpSource(n){
+  const el = document.getElementById('src-'+n);
+  if(!el) return;
+  el.scrollIntoView({behavior:'smooth',block:'center'});
+  el.classList.add('flash');
+  setTimeout(()=>el.classList.remove('flash'),1200);
+}
 const SUGGESTS = ['我的收藏里是怎么讲土地财政的？','收藏的文章怎么看待时间管理？','论文写作有什么建议？','分税制改革的影响是什么？'];
 function renderSuggests(){
   $('suggestBox').innerHTML = SUGGESTS.map(s=>`<button onclick="$('chatInput').value=this.textContent;sendChat()">${s}</button>`).join('');
@@ -444,7 +472,7 @@ async function sendChat(){
   log.scrollTop = log.scrollHeight;
   try {
     const d = await api('chat','POST',{question:q});
-    $('pending').outerHTML = `<div class="bubble ai">${esc(d.answer)}${d.sources.length?'<div class="src">引用：'+d.sources.map(s=>`[${s.n}] ${esc(s.title)}`).join(' · ')+'</div>':''}</div>`;
+    $('pending').outerHTML = `<div class="bubble ai">${renderAnswer(d.answer)}${srcListHtml(d.sources)}</div>`;
   } catch(e){ $('pending').outerHTML = `<div class="bubble ai">出错了：${esc(e.message)}</div>`; }
   log.scrollTop = log.scrollHeight;
 }
