@@ -94,7 +94,7 @@ select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size
 .clamp3{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .recoBtn{color:var(--accent);cursor:pointer;font-weight:600;user-select:none}
 .recoBtn:hover{text-decoration:underline}
-.del{position:absolute;top:10px;right:12px;color:#ccc;font-size:15px;cursor:pointer}.del:hover{color:#ef4444}
+.del{position:absolute;top:10px;right:12px;color:#ccc;font-size:15px;cursor:pointer}.del.sure{color:#ef4444;font-weight:700;white-space:nowrap;background:#fef2f2;border-radius:8px;padding:2px 8px}.del:hover{color:#ef4444}
 </style>
 </head>
 <body>
@@ -278,7 +278,7 @@ function renderItems(){
     const card = document.createElement('div'); card.className='card';
     card.onclick = ()=>openItem(it.id);
     card.innerHTML = `
-      <div class="del" onclick="event.stopPropagation();delItem(${it.id})">×</div>
+      <div class="del" onclick="event.stopPropagation();delClick(this,${it.id})">×</div>
       <h3>${esc(it.title)}</h3>
       <div class="one">${esc(it.one_sentence)}</div>
       <div class="tags">${it.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>
@@ -287,7 +287,13 @@ function renderItems(){
     g.appendChild(card);
   }
 }
-async function delItem(id){ if(!confirm('删除这条收藏？'))return; await api('items/'+id,'DELETE'); refresh(); }
+async function delItem(id){ await api('items/'+id,'DELETE'); refresh(); toast('已删除'); }
+// 两段式删除：第一次点变“确认删除”，再点才真删（避免 confirm 被浏览器拦截导致静默失效）
+function delClick(el,id){
+  if(el.dataset.armed){ el.dataset.armed=''; delItem(id); return; }
+  el.dataset.armed='1'; el.textContent='确认删除'; el.classList.add('sure');
+  setTimeout(()=>{ el.dataset.armed=''; el.textContent='×'; el.classList.remove('sure'); },2500);
+}
 
 // ---------- modal ----------
 async function openItem(id){
