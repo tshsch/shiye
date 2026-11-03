@@ -72,6 +72,7 @@ try { db.exec('ALTER TABLE comments ADD COLUMN user_id INTEGER'); } catch (e) {}
 try { db.exec("ALTER TABLE users ADD COLUMN nickname TEXT DEFAULT ''"); } catch (e) {}
 try { db.exec("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''"); } catch (e) {}
 try { db.exec("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ''"); } catch (e) {}
+try { db.exec("ALTER TABLE items ADD COLUMN agent_log TEXT DEFAULT ''"); } catch (e) {}
 db.exec('CREATE INDEX IF NOT EXISTS idx_items_user ON items(user_id); CREATE INDEX IF NOT EXISTS idx_chunks_item ON chunks(item_id);');
 
 // ---------- books 全局共享：规范书名去重（同名书合并为一本） ----------
@@ -349,6 +350,163 @@ async function canonicalBook(input) {
   return j;
 }
 
+// 书名归一入口：精确匹配 -> AI 规范化（真书校验/译名副标题归一）-> 新建；建书 API 与整理智能体共用
+async function resolveBook(userId, rawTitle, author, note) {
+  const raw = String(rawTitle || '').trim().slice(0, 80);
+  if (!raw) return { error: '缺少书名' };
+  const norm = normBookTitle(raw);
+  let book = norm ? db.prepare('SELECT * FROM books WHERE norm=?').get(norm) : null;
+  let created = false, ai = false;
+  if (!book && LLM_KEY) {
+    try {
+      const c = await canonicalBook(raw);
+      if (c.book_id) {
+        book = db.prepare('SELECT * FROM books WHERE id=?').get(Number(c.book_id)) || null;
+        ai = true;
+      } else if (c.is_book === false) {
+        return { error: '「' + raw + '」看起来不像一本书名（可能是文章或课程）。书架用来聚合某本书的资料，请换一个真实的书名。' };
+      } else {
+        const t = String(c.title || raw).replace(/[《》]/g, '').trim().slice(0, 80);
+        book = db.prepare('SELECT * FROM books WHERE norm=?').get(normBookTitle(t)) || null;
+        if (!book) {
+          const nid = db.prepare('INSERT INTO books(user_id,title,author,note,norm) VALUES(?,?,?,?,?)')
+            .run(userId, t, String(c.author || author || '').slice(0, 40), String(note || '').slice(0, 200), normBookTitle(t)).lastInsertRowid;
+          book = db.prepare('SELECT * FROM books WHERE id=?').get(nid);
+          created = true;
+        }
+        ai = true;
+      }
+    } catch (e) { /* AI 失败退回精确匹配 */ }
+  }
+  if (!book) {
+    const nid = db.prepare('INSERT INTO books(user_id,title,author,note,norm) VALUES(?,?,?,?,?)')
+      .run(userId, raw, String(author || '').slice(0, 40), String(note || '').slice(0, 200), norm).lastInsertRowid;
+    book = db.prepare('SELECT * FROM books WHERE id=?').get(nid);
+    created = true;
+  }
+  return { book, created, ai };
+}
+
+// 面向智能体的 LLM 调用：返回完整消息（含 tool_calls），无 key 返回 null
+async function llmMsg(messages, tools) {
+  if (!LLM_KEY) return null;
+  const body = { model: LLM_MODEL, messages, temperature: 0.3 };
+  if (tools && tools.length) body.tools = tools;
+  const r = await fetch(LLM_BASE + '/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + LLM_KEY },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120000)
+  });
+  if (!r.ok) throw new Error('LLM ' + r.status + ': ' + (await r.text()).slice(0, 300));
+  const data = await r.json();
+  return data.choices[0].message;
+}
+
+// ---------- 自主整理智能体：多步工具调用，自主决定归类 ----------
+const ORGANIZE_TOOLS = [
+  { type: 'function', function: { name: 'list_library', description: '查看用户的文件夹和书架（书是全体共享的，重名自动归一）', parameters: { type: 'object', properties: {}, required: [] } } },
+  { type: 'function', function: { name: 'attach_to_book', description: '把这篇收藏挂到某本书下。只在这篇文章确实围绕这本书（书评/读书笔记/书中主题详解）时使用', parameters: { type: 'object', properties: { book_id: { type: 'integer', description: 'list_library 返回的书 id' } }, required: ['book_id'] } } },
+  { type: 'function', function: { name: 'create_book', description: '书架里没有合适的书时新建一本（同名/译名会自动归一，不会重复建书；乱编书名会被拒绝）', parameters: { type: 'object', properties: { title: { type: 'string' }, author: { type: 'string' } }, required: ['title'] } } },
+  { type: 'function', function: { name: 'move_to_folder', description: '把收藏移入用户已有的文件夹', parameters: { type: 'object', properties: { folder_id: { type: 'integer' } }, required: ['folder_id'] } } },
+  { type: 'function', function: { name: 'create_folder', description: '确实需要新分类时新建一个文件夹', parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } } },
+  { type: 'function', function: { name: 'set_tags', description: '重新设置这篇文章的标签（3-4个中文短标签）', parameters: { type: 'object', properties: { tags: { type: 'array', items: { type: 'string' } } }, required: ['tags'] } } },
+  { type: 'function', function: { name: 'done', description: '整理完成，汇报你做了什么（或说明为何不整理）', parameters: { type: 'object', properties: { note: { type: 'string', description: '一句话中文汇报' } }, required: ['note'] } } }
+];
+
+async function organizeItem(itemId, userId) {
+  const it = db.prepare('SELECT * FROM items WHERE id=?').get(itemId);
+  if (!it) return { actions: [], note: '' };
+  const actions = [];
+  const execTool = async (name, args) => {
+    if (name === 'list_library') {
+      const folders = db.prepare('SELECT f.id, f.name, f.is_public, (SELECT COUNT(*) FROM items i WHERE i.folder_id=f.id) AS n FROM folders f WHERE f.user_id=?').all(userId);
+      const books = db.prepare('SELECT b.id, b.title, b.author, (SELECT COUNT(*) FROM items i WHERE i.book_id=b.id AND i.user_id=?) AS n FROM books b WHERE b.user_id=? OR EXISTS(SELECT 1 FROM items i2 WHERE i2.book_id=b.id AND i2.user_id=?)').all(userId, userId, userId);
+      return { folders, books };
+    }
+    if (name === 'attach_to_book') {
+      const b = db.prepare('SELECT * FROM books WHERE id=?').get(Number(args.book_id));
+      if (!b) return { error: '书不存在' };
+      db.prepare('UPDATE items SET book_id=? WHERE id=?').run(b.id, itemId);
+      actions.push({ action: '挂到《' + b.title + '》' });
+      return { ok: true, book: b.title };
+    }
+    if (name === 'create_book') {
+      const r = await resolveBook(userId, String(args.title || ''), String(args.author || ''), '');
+      if (r.error) return { error: r.error };
+      db.prepare('UPDATE items SET book_id=? WHERE id=?').run(r.book.id, itemId);
+      actions.push({ action: (r.created ? '新建并挂到' : '挂到已有') + '《' + r.book.title + '》' });
+      return { ok: true, book_id: r.book.id, book: r.book.title, reused: !r.created };
+    }
+    if (name === 'move_to_folder') {
+      const f = db.prepare('SELECT * FROM folders WHERE id=? AND user_id=?').get(Number(args.folder_id), userId);
+      if (!f) return { error: '文件夹不存在' };
+      db.prepare('UPDATE items SET folder_id=? WHERE id=?').run(f.id, itemId);
+      actions.push({ action: '移入文件夹「' + f.name + '」' });
+      return { ok: true, folder: f.name };
+    }
+    if (name === 'create_folder') {
+      const name = String(args.name || '').trim().slice(0, 40);
+      if (!name) return { error: '名称为空' };
+      let f = db.prepare('SELECT * FROM folders WHERE user_id=? AND name=?').get(userId, name);
+      if (!f) f = { id: db.prepare('INSERT INTO folders(user_id,name,is_public) VALUES(?,?,0)').run(userId, name).lastInsertRowid };
+      db.prepare('UPDATE items SET folder_id=? WHERE id=?').run(f.id, itemId);
+      actions.push({ action: '移入文件夹「' + name + '」' });
+      return { ok: true, folder_id: f.id, folder: name };
+    }
+    if (name === 'set_tags') {
+      const tags = (Array.isArray(args.tags) ? args.tags : []).map(t => String(t).slice(0, 8)).filter(Boolean).slice(0, 4);
+      if (!tags.length) return { error: '标签为空' };
+      db.prepare('UPDATE items SET tags=? WHERE id=?').run(JSON.stringify(tags), itemId);
+      actions.push({ action: '标签更新为 ' + tags.join('/') });
+      return { ok: true, tags };
+    }
+    if (name === 'done') return { ok: true, note: String(args.note || '').slice(0, 120) };
+    return { error: '未知工具' };
+  };
+  const sys = '你是"拾页"的自主整理智能体。用户刚收藏了一篇文章，你通过工具查看他的文件夹与书架，自主决定这篇收藏的归类。规则：1) 只有内容确实围绕某本书（书评、读书笔记、对书中主题的深入解读）时才挂书，且优先复用已有书；2) 不确定就不要挂书，绝不乱挂；3) 优先使用已有文件夹归类，除非明显需要新分类；4) 需要时可以更新标签使其更准确；5) 完成后调用 done，用一句话中文说明你做了什么（没做什么也说明）。';
+  const msgs = [
+    { role: 'system', content: sys },
+    { role: 'user', content: '新收藏如下，请自主整理。\n标题：' + it.title + '\nAI 摘要：' + (it.summary || '') + '\n当前标签：' + (it.tags || '[]') + '\n正文片段：' + String(it.content || '').slice(0, 1500) }
+  ];
+  let note = '';
+  if (!LLM_KEY) {
+    // 演示模式兜底：正文提到书架已有书名就自动挂书
+    const text = String(it.content || '');
+    for (const b of db.prepare('SELECT * FROM books').all()) {
+      if (b.title && b.title.length >= 2 && text.includes(b.title) && it.book_id !== b.id) {
+        db.prepare('UPDATE items SET book_id=? WHERE id=?').run(b.id, itemId);
+        actions.push({ action: '挂到《' + b.title + '》' });
+        break;
+      }
+    }
+    note = actions.map(a => a.action).join('；');
+    if (note) db.prepare('UPDATE items SET agent_log=? WHERE id=?').run(JSON.stringify({ note, actions }), itemId);
+    return { actions, note };
+  }
+  for (let step = 0; step < 8; step++) {
+    let msg;
+    try { msg = await llmMsg(msgs, ORGANIZE_TOOLS); } catch (e) { break; }
+    if (!msg) break;
+    msgs.push(msg);
+    const calls = msg.tool_calls || [];
+    if (!calls.length) break;
+    let finished = false;
+    for (const tc of calls) {
+      let args = {};
+      try { args = JSON.parse(tc.function.arguments || '{}'); } catch (e) {}
+      let result;
+      try { result = await execTool(tc.function.name, args); } catch (e) { result = { error: String(e.message || e) }; }
+      if (tc.function.name === 'done') { note = (result && result.note) || ''; finished = true; }
+      msgs.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 1500) });
+    }
+    if (finished) break;
+  }
+  if (!note && actions.length) note = actions.map(a => a.action).join('；');
+  if (note) db.prepare('UPDATE items SET agent_log=? WHERE id=?').run(JSON.stringify({ note, actions }), itemId);
+  return { actions, note };
+}
+
 function itemRow(r) { return { ...r, tags: JSON.parse(r.tags || '[]') }; }
 
 async function handleApi(req, res, pathname, query) {
@@ -436,39 +594,9 @@ async function handleApi(req, res, pathname, query) {
 
   if (method === 'POST' && pathname === '/api/books') {
     const b = await readBody(req);
-    const raw = String(b.title || '').trim().slice(0, 80);
-    if (!raw) return json(res, 400, { error: '缺少书名' });
-    const norm = normBookTitle(raw);
-    let book = norm ? db.prepare('SELECT * FROM books WHERE norm=?').get(norm) : null;
-    let created = false, ai = false;
-    if (!book && LLM_KEY) {
-      try {
-        const c = await canonicalBook(raw);
-        if (c.book_id) {
-          book = db.prepare('SELECT * FROM books WHERE id=?').get(Number(c.book_id)) || null;
-          ai = true;
-        } else if (c.is_book === false) {
-          return json(res, 422, { error: '「' + raw + '」看起来不像一本书名（可能是文章或课程）。书架用来聚合某本书的资料，请换一个真实的书名。' });
-        } else {
-          const t = String(c.title || raw).replace(/[《》]/g, '').trim().slice(0, 80);
-          book = db.prepare('SELECT * FROM books WHERE norm=?').get(normBookTitle(t)) || null;
-          if (!book) {
-            const nid = db.prepare('INSERT INTO books(user_id,title,author,note,norm) VALUES(?,?,?,?,?)')
-              .run(me, t, String(c.author || b.author || '').slice(0, 40), String(b.note || '').slice(0, 200), normBookTitle(t)).lastInsertRowid;
-            book = db.prepare('SELECT * FROM books WHERE id=?').get(nid);
-            created = true;
-          }
-          ai = true;
-        }
-      } catch (e) { /* AI 失败退回精确匹配 */ }
-    }
-    if (!book) {
-      const nid = db.prepare('INSERT INTO books(user_id,title,author,note,norm) VALUES(?,?,?,?,?)')
-        .run(me, raw, String(b.author || '').slice(0, 40), String(b.note || '').slice(0, 200), norm).lastInsertRowid;
-      book = db.prepare('SELECT * FROM books WHERE id=?').get(nid);
-      created = true;
-    }
-    return json(res, 200, { id: book.id, title: book.title, created, ai });
+    const r = await resolveBook(me, b.title, b.author, b.note);
+    if (r.error) return json(res, r.error.indexOf('不像一本书名') !== -1 ? 422 : 400, { error: r.error });
+    return json(res, 200, { id: r.book.id, title: r.book.title, created: r.created, ai: r.ai });
   }
 
   // 书籍详情（公开）：我的资料 + 其他同学的公开资料
@@ -519,11 +647,23 @@ async function handleApi(req, res, pathname, query) {
         b.folder_id || null, b.book_id || null
       ).lastInsertRowid;
       for (const c of chunkText(text)) db.prepare('INSERT INTO chunks(item_id,idx,text) VALUES(?,?,?)').run(id, c.idx, c.text);
+      let agent = { actions: [], note: '' };
+      try { agent = await organizeItem(id, me); } catch (e) { /* 整理失败不影响收藏 */ }
       const item = itemRow(db.prepare('SELECT * FROM items WHERE id=?').get(id));
-      return json(res, 200, { item, ai: !!LLM_KEY && a.summary !== fallbackAnalyze(title, text).summary || !!(a && a.tags && a.tags.length && a.tags[0] !== '待整理') });
+      return json(res, 200, { item, agent, ai: !!LLM_KEY && a.summary !== fallbackAnalyze(title, text).summary || !!(a && a.tags && a.tags.length && a.tags[0] !== '待整理') });
     } catch (e) {
       return json(res, 422, { error: String(e.message || e) });
     }
+  }
+
+  // 让整理智能体重新整理某篇收藏
+  const om = pathname.match(/^\/api\/items\/(\d+)\/organize$/);
+  if (method === 'POST' && om) {
+    const item = db.prepare('SELECT id FROM items WHERE id=? AND user_id=?').get(Number(om[1]), me);
+    if (!item) return json(res, 404, { error: 'not found' });
+    const agent = await organizeItem(item.id, me);
+    const out = itemRow(db.prepare('SELECT * FROM items WHERE id=?').get(item.id));
+    return json(res, 200, { item: out, agent });
   }
 
   const im = pathname.match(/^\/api\/items\/(\d+)$/);

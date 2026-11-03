@@ -108,7 +108,8 @@ $("save").onclick = async () => {
     const it = d.item;
     const box = $("result");
     box.style.display = "block";
-    box.innerHTML = `<b>${esc(it.title)}</b><br>${esc(it.one_sentence)}<br>${it.tags.map(t => "#" + esc(t)).join(" ")} · 约${it.minutes}分钟`;
+    const ag = d.agent && d.agent.note ? "🤖 " + esc(d.agent.note) + "<br>" : "";
+    box.innerHTML = `<b>${esc(it.title)}</b><br>${esc(it.one_sentence)}<br>${it.tags.map(t => "#" + esc(t)).join(" ")} · 约${it.minutes}分钟<br>${ag}`;
   } catch (e) {
     if (e.status === 401) { loggedIn = false; init(); return; }
     $("err").style.display = "block";

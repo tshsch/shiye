@@ -261,7 +261,8 @@ async function saveItem(){
     const d = await api('items','POST',{url, text});
     $('urlInput').value=''; $('textInput').value='';
     const n = $('saveNote'); n.style.display='block';
-    n.textContent = '已收藏《'+d.item.title+'》，AI 生成了导读，去收藏夹看看 →';
+    const ag = d.agent && d.agent.note ? ' 🤖 ' + d.agent.note : '，AI 生成了导读';
+    n.textContent = '已收藏《'+d.item.title+'》' + ag + '，去收藏夹看看 →';
     await refresh();
   } catch(e){ toast(e.message); }
   btn.disabled=false; btn.textContent='收进来';
@@ -368,6 +369,11 @@ async function openItem(id){
     cs = S.comments.filter(c=>c.item_id===id);
   }
   it = { ...it, tags: Array.isArray(it.tags) ? it.tags : JSON.parse(it.tags || '[]') };
+  let agentHtml = '';
+  try {
+    const ag = typeof it.agent_log === 'string' ? JSON.parse(it.agent_log || 'null') : it.agent_log;
+    if (ag && ag.note) agentHtml = '<div class="reco" style="margin-top:10px">🤖 <b>整理智能体</b>：' + esc(ag.note) + '</div>';
+  } catch(e) {}
   let selectorHtml = '', noteHtml = '';
   if (ownerView) {
     const folderOpts = S.folders.map(f=>`<option value="${f.id}" ${f.id===it.folder_id?'selected':''}>${esc(f.name)}</option>`).join('');
@@ -377,6 +383,7 @@ async function openItem(id){
       📁 <select id="mFolder">${folderOpts}</select>
       📖 <select id="mBook">${bookOpts}</select>
       <button class="btn small ghost" onclick="saveMeta(${id})">保存</button>
+      <button class="btn small ghost" onclick="reorganize(${id})" title="让智能体重新决定归类">🤖 重新整理</button>
     </div>`;
     noteHtml = `
     <div class="selrow" style="margin:-4px 0 14px">
@@ -389,6 +396,7 @@ async function openItem(id){
     <h2>${esc(it.title)}</h2>
     <div class="meta"><span>约 ${it.minutes} 分钟读完</span>${it.url?`<a href="${esc(it.url)}" target="_blank">原文链接</a>`:''}</div>
     <div class="sum"><b>AI 导读</b><br>${esc(it.summary)}</div>
+    ${agentHtml}
     <div class="tags">${it.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>
     ${selectorHtml}
     ${noteHtml}
@@ -405,6 +413,13 @@ function closeModal(){ $('mask').classList.remove('show'); }
 async function saveMeta(id){
   await api('items/'+id,'PATCH',{ folder_id: $('mFolder').value || null, book_id: $('mBook').value || null, recommend_note: $('mNote').value.trim(), author_name: S.username || '同学' });
   await refresh(); closeModal(); toast($('mNote').value.trim() ? '已保存并推荐到广场' : '已保存');
+}
+async function reorganize(id){
+  try {
+    const d = await api('items/'+id+'/organize','POST',{});
+    toast(d.agent && d.agent.note ? '🤖 ' + d.agent.note : '智能体觉得当前归类已经合适');
+    await refresh(); openItem(id);
+  } catch(e){ toast(e.message); }
 }
 async function postComment(id){
   const text = $('ctext').value.trim();
