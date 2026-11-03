@@ -122,6 +122,22 @@ async function llm(messages, jsonMode) {
   return data.choices[0].message.content;
 }
 
+// 正文智能提取：优先 <article>/<main> 容器，并过滤导航/推广等垃圾行
+function pickMainHtml(html) {
+  for (const re of [/<article[^>]*>([\s\S]*?)<\/article>/i, /<main[^>]*>([\s\S]*?)<\/main>/i]) {
+    const m = html.match(re);
+    if (m && m[1].replace(/<[^>]+>/g, '').replace(/\s/g, '').length > 200) return m[1];
+  }
+  return html;
+}
+const JUNK_RE = /^(首页|登录|注册|关注|订阅|分享|点赞|评论|收藏|转发|返回|更多|阅读原文|查看原文|上一篇|下一篇|相关阅读|推荐阅读|热门推荐|扫码|下载|广告|赞助|版权所有|免责声明|往期回顾|目录|展开|收起|全部|搜索|ICP备.*|粤ICP.*|京ICP.*)[\s\d。：:·|-]*$/;
+function isJunkLine(s) {
+  if (!s) return true;
+  if (JUNK_RE.test(s)) return true;
+  if (s.length <= 8 && !/[。！？！？.!?]$/.test(s) && !/^[-•*\d]/.test(s)) return true; // 短且不成句，多为导航
+  if (/[腾讯|微信|微博|二维码|公众号]{2,}(扫码|关注)/.test(s)) return true;
+  return false;
+}
 async function extractFromUrl(url) {
   const r = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36' },
@@ -135,11 +151,12 @@ async function extractFromUrl(url) {
     .replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<nav[\s\S]*?<\/nav>/gi, ' ').replace(/<header[\s\S]*?<\/header>/gi, ' ')
     .replace(/<footer[\s\S]*?<\/footer>/gi, ' ').replace(/<!--[\s\S]*?-->/g, ' ');
+  html = pickMainHtml(html); // 正文容器优先
   const text = html
     .replace(/<\/(p|div|li|h[1-6]|br|tr|section|article)>/gi, '\n')
     .replace(/<[^>]+>/g, '')
     .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-    .split('\n').map(s => s.trim()).filter(s => s.length > 1).join('\n').replace(/\n{3,}/g, '\n\n');
+    .split('\n').map(s => s.trim()).filter(s => s.length > 1 && !isJunkLine(s)).join('\n').replace(/\n{3,}/g, '\n\n');
   return { title, text: text.slice(0, 16000) };
 }
 
