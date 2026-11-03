@@ -166,6 +166,7 @@ window.addEventListener('unhandledrejection', function(e){
       <button class="btn" onclick="openRecommend()">📢 推荐一篇到广场</button>
       <span class="hint">推荐语写一句理由，全年级都能看到</span>
     </div>
+    <div class="folder-strip" id="squareSort"></div>
     <div class="grid" id="squareGrid"></div>
   </div>
 
@@ -310,7 +311,7 @@ function renderItems(){
       <div class="one">${esc(it.one_sentence)}</div>
       <div class="tags">${it.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>
       ${it.recommend_note?`<div class="reco">💬 ${esc(it.author_name||'同学')}：${esc(it.recommend_note)}</div>`:''}
-      <div class="meta"><span>约 ${it.minutes} 分钟</span>${folder?`<span>📁 ${esc(folder.name)}</span>`:''}${book?`<span>📖 ${esc(book.title)}</span>`:''}<span class="recoBtn" onclick="event.stopPropagation();openRecommend(${it.id})">📢 推荐</span></div>`;
+      <div class="meta"><span>约 ${it.minutes} 分钟</span>${folder?`<span>📁 ${esc(folder.name)}</span>`:''}${book?`<span>📖 ${esc(book.title)}</span>`:''}${(S.comments||[]).some(cc=>cc.item_id===it.id)?`<span>💬 ${(S.comments||[]).filter(cc=>cc.item_id===it.id).length}</span>`:''}<span class="recoBtn" onclick="event.stopPropagation();openRecommend(${it.id})">📢 推荐</span></div>`;
     g.appendChild(card);
   }
 }
@@ -410,9 +411,15 @@ function openBook(id){
 }
 
 // ---------- square ----------
+let squareSort = 'new';
 function renderSquare(){
   const g = $('squareGrid');
-  const pubs = S.square || [];
+  let pubs = (S.square || []).slice();
+  const sortStrip = $('squareSort');
+  if (sortStrip) sortStrip.innerHTML =
+    `<div class="folder-chip ${squareSort==='new'?'on':''}" onclick="squareSort='new';renderSquare()">🕐 最新</div>` +
+    `<div class="folder-chip ${squareSort==='hot'?'on':''}" onclick="squareSort='hot';renderSquare()">🔥 最热</div>`;
+  if (squareSort === 'hot') pubs.sort((a,b)=>(b.comment_count||0)-(a.comment_count||0));
   g.innerHTML = pubs.length ? '' : '<div class="empty" style="grid-column:1/-1">广场还很安静，把一个收藏夹设为公开试试</div>';
   for (const it of pubs){
     const mine = S.items.some(x=>x.id===it.id);
@@ -461,23 +468,42 @@ async function submitRecommend(){
 // ---------- chat ----------
 // 问答引用渲染：编号徽章可点击跳转，引用卡片可点击打开原收藏
 function renderAnswer(text){
-  return esc(text).replace(/\[(\d{1,2})\]/g, (m,n)=>`<sup class="cite" onclick="jumpSource(${n})" title="查看引用来源">${n}</sup>`);
+  return esc(text).replace(/\[(\d{1,2})\]/g, (m,n)=>`<sup class="cite" onclick="jumpSource(${n},this)" title="查看引用来源">${n}</sup>`);
 }
 function srcListHtml(sources){
   if(!sources||!sources.length) return '';
   const cards = sources.map(s=>`
-    <div class="srcCard" id="src-${s.n}" onclick="openItem(${s.item_id})" title="点击打开原文">
+    <div class="srcCard" data-n="${s.n}" onclick="openItem(${s.item_id})" title="点击打开原文">
       <b>[${s.n}] ${esc(s.title)}</b>
       <div class="snippet">${esc(s.snippet)}……</div>
     </div>`).join('');
   return `<div class="srcList"><div class="srcTitle">引用来源（点击打开）</div>${cards}</div>`;
 }
-function jumpSource(n){
-  const el = document.getElementById('src-'+n);
-  if(!el) return;
-  el.scrollIntoView({behavior:'smooth',block:'center'});
-  el.classList.add('flash');
-  setTimeout(()=>el.classList.remove('flash'),1200);
+function jumpSource(n, el){
+  const bubble = el && el.closest ? el.closest('.bubble.ai') : null;
+  const card = bubble ? bubble.querySelector('.srcCard[data-n="'+n+'"]') : document.querySelector('.srcCard[data-n="'+n+'"]');
+  if(!card) return;
+  card.scrollIntoView({behavior:'smooth',block:'center'});
+  card.classList.add('flash');
+  setTimeout(()=>card.classList.remove('flash'),1200);
+}
+// 问答历史：localStorage 按用户保存最近 30 轮，刷新页面不丢
+let chatKey = null;
+function loadChatHistory(){
+  if(!chatKey) return;
+  let arr=[]; try{ arr=JSON.parse(localStorage.getItem(chatKey)||'[]'); }catch(e){}
+  const log = $('chatLog');
+  for(const m of arr){
+    log.insertAdjacentHTML('beforeend', `<div class="bubble me">${esc(m.q)}</div><div class="bubble ai">${renderAnswer(m.answer)}${srcListHtml(m.sources||[])}</div>`);
+  }
+  if(arr.length) log.scrollTop = log.scrollHeight;
+}
+function saveChat(q, answer, sources){
+  if(!chatKey) return;
+  let arr=[]; try{ arr=JSON.parse(localStorage.getItem(chatKey)||'[]'); }catch(e){}
+  arr.push({q, answer, sources});
+  while(arr.length>30) arr.shift();
+  try{ localStorage.setItem(chatKey, JSON.stringify(arr)); }catch(e){}
 }
 const SUGGESTS = ['我的收藏里是怎么讲土地财政的？','收藏的文章怎么看待时间管理？','论文写作有什么建议？','分税制改革的影响是什么？'];
 function renderSuggests(){
@@ -492,6 +518,7 @@ async function sendChat(){
   try {
     const d = await api('chat','POST',{question:q});
     $('pending').outerHTML = `<div class="bubble ai">${renderAnswer(d.answer)}${srcListHtml(d.sources)}</div>`;
+    saveChat(q, d.answer, d.sources||[]);
   } catch(e){ $('pending').outerHTML = `<div class="bubble ai">出错了：${esc(e.message)}</div>`; }
   log.scrollTop = log.scrollHeight;
 }
@@ -505,6 +532,8 @@ async function boot(){
     const me = await api('me');
     $('userBadge').textContent = '👋 ' + me.username;
     $('userBadge').style.display = '';
+    chatKey = 'shiy_chat_' + me.username;
+    loadChatHistory();
     await refresh();
   } catch(e){ showAuth(); }
 }
