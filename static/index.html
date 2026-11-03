@@ -99,6 +99,7 @@ sup.cite{color:var(--accent);cursor:pointer;font-weight:700;margin:0 2px}
 .cbtn{cursor:pointer;font-size:12px;color:var(--sub);user-select:none}
 .cbtn.on{color:var(--accent);font-weight:700}
 .cava{width:20px;height:20px;border-radius:50%;vertical-align:-5px;margin-right:6px;object-fit:cover}
+.cavainit{display:inline-flex;align-items:center;justify-content:center;background:var(--accent2);color:var(--accent);font-size:11px;font-weight:700}
 .clamp3{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .recoBtn{color:var(--accent);cursor:pointer;font-weight:600;user-select:none}
 .recoBtn:hover{text-decoration:underline}
@@ -453,7 +454,7 @@ async function openItem(id){
     ${noteHtml}
     <details><summary style="cursor:pointer;font-size:13px;color:var(--sub)">查看正文</summary><div class="content" style="margin-top:10px">${esc(it.content)}</div></details>
     <div class="section" style="font-size:14px;margin:16px 0 4px">评论讨论</div>
-    ${cs.map(c=>`<div class="comment"><b>${esc(c.user_name)}</b>${c.user_avatar?`<img class="cava" src="${esc(c.user_avatar)}">`:''}<span class="c-sub">${c.created_at}</span><br>${esc(c.text)}<div class="cact"><span class="cbtn ${c.liked_by_me?'on':''}" onclick="toggleComment(${c.id},'like',${id})">👍 ${c.like_count||0}</span><span class="cbtn ${c.faved_by_me?'on':''}" onclick="toggleComment(${c.id},'fav',${id})">⭐ 收藏</span></div></div>`).join('') || '<div class="hint">还没有评论</div>'}
+    ${cs.map(c=>`<div class="comment">${c.user_avatar?`<img class="cava" src="${esc(c.user_avatar)}">`:`<span class="cava cavainit">${esc((c.user_name||'同').slice(0,1).toUpperCase())}</span>`}<b>${esc(c.user_name)}</b><span class="c-sub">${c.created_at}</span><br>${esc(c.text)}<div class="cact"><span class="cbtn ${c.liked_by_me?'on':''}" onclick="toggleComment(${c.id},'like',${id})">👍 ${c.like_count||0}</span><span class="cbtn ${c.faved_by_me?'on':''}" onclick="toggleComment(${c.id},'fav',${id})">⭐ 收藏</span></div></div>`).join('') || '<div class="hint">还没有评论</div>'}
     <div class="cform" style="flex-direction:column;align-items:stretch">
       <textarea id="ctext" rows="2" placeholder="写下你的看法，支持长评（Ctrl+回车发送）…" style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px;font-family:inherit;resize:vertical" onkeydown="if(event.ctrlKey&&event.key==='Enter')postComment(${id})"></textarea>
       <button class="btn small" onclick="postComment(${id})" style="align-self:flex-end;margin-top:6px">发送</button>
@@ -462,7 +463,7 @@ async function openItem(id){
 }
 function closeModal(){ $('mask').classList.remove('show'); }
 async function saveMeta(id){
-  await api('items/'+id,'PATCH',{ folder_id: $('mFolder').value || null, book_id: $('mBook').value || null, recommend_note: $('mNote').value.trim(), author_name: S.username || '同学' });
+  await api('items/'+id,'PATCH',{ folder_id: $('mFolder').value || null, book_id: $('mBook').value || null, recommend_note: $('mNote').value.trim(), author_name: (ME && (ME.nickname || ME.username)) || S.username || '同学' });
   await refresh(); closeModal(); toast($('mNote').value.trim() ? '已保存并推荐到广场' : '已保存');
 }
 async function reorganize(id){
@@ -553,7 +554,7 @@ function renderSquare(){
     card.onclick = ()=>openItem(it.id);
     card.innerHTML = cardShell(it, {
       reco: it.recommend_note || '觉得不错，分享给大家',
-      recoName: it.author_name || it.owner || '同学',
+      recoName: (it.author_name && it.author_name !== it.owner_username) ? it.author_name : (it.owner || '同学'),
       hot: it.hot_comment || null,
       owner: (it.owner || '同学') + (mine ? '（你）' : ''),
       book: it.book_id ? { id: it.book_id, title: it.book_title } : null,
@@ -588,7 +589,7 @@ function openRecommend(preId){
 async function submitRecommend(){
   const id = $('rItem').value, note = $('rNote').value.trim();
   if (!note) { toast('写一句推荐理由吧'); return; }
-  await api('items/'+id,'PATCH',{ recommend_note: note, author_name: (S.username||'同学') });
+  await api('items/'+id,'PATCH',{ recommend_note: note, author_name: (ME && (ME.nickname || ME.username)) || S.username || '同学' });
   await refresh(); closeModal(); toast('已发布到广场 🎉');
   document.querySelector('nav button[data-tab="square"]').click();
 }
@@ -737,7 +738,7 @@ async function loadFavs(){
   try {
     const d = await api('fav-comments');
     $('favList').innerHTML = d.comments.length ? d.comments.map(c=>`
-      <div class="comment"><b>${esc(c.user_name)}</b> <span class="c-sub">评《${esc(c.item_title)}》</span><br>${esc(c.text)}
+      <div class="comment">${c.user_avatar?`<img class="cava" src="${esc(c.user_avatar)}">`:`<span class="cava cavainit">${esc((c.user_name||'同').slice(0,1).toUpperCase())}</span>`}<b>${esc(c.user_name)}</b> <span class="c-sub">评《${esc(c.item_title)}》</span><br>${esc(c.text)}
       <div class="cact"><span class="cbtn ${c.liked_by_me?'on':''}" onclick="toggleComment(${c.id},'like')">👍 ${c.like_count||0}</span><span class="cbtn on" onclick="toggleComment(${c.id},'fav')">⭐ 已收藏</span></div></div>`).join('')
       : '<div class="hint">还没有收藏过评论。在任意评论下方点 ⭐ 收藏，它就会出现在这里。</div>';
   } catch(e){ $('favList').innerHTML = '<div class="hint">加载失败</div>'; }

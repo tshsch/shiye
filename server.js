@@ -774,7 +774,7 @@ async function handleApi(req, res, pathname, query) {
     let comments = [];
     for (const iid of mine) comments = comments.concat(commentsFor(iid, me));
     const square = db.prepare(`SELECT i.id, i.title, i.one_sentence, i.minutes, i.recommend_note, i.author_name, i.user_id,
-      u.username AS owner, f.name AS folder_name, i.book_id, bb.title AS book_title, i.tags,
+      COALESCE(NULLIF(u.nickname,''), u.username) AS owner, u.username AS owner_username, f.name AS folder_name, i.book_id, bb.title AS book_title, i.tags,
       (SELECT COUNT(*) FROM comments c WHERE c.item_id = i.id) AS comment_count,
       (SELECT COALESCE(NULLIF(u2.nickname,''), u2.username, c.user_name) || '：' || c.text FROM comments c LEFT JOIN users u2 ON u2.id = c.user_id WHERE c.item_id = i.id ORDER BY (SELECT COUNT(*) FROM comment_likes cl WHERE cl.comment_id = c.id) DESC, c.id DESC LIMIT 1) AS hot_comment
       FROM items i LEFT JOIN folders f ON f.id = i.folder_id LEFT JOIN users u ON u.id = i.user_id LEFT JOIN books bb ON bb.id = i.book_id
@@ -896,7 +896,7 @@ async function handleApi(req, res, pathname, query) {
     db.prepare('INSERT INTO item_opens(user_id,item_id) VALUES(?,?)').run(me, item.id);
     const comments = commentsFor(item.id, me);
     const owner = db.prepare('SELECT username, nickname, avatar FROM users WHERE id=?').get(item.user_id);
-    const out = itemRow(item); out.owner_name = owner ? owner.username : '同学';
+    const out = itemRow(item); out.owner_name = owner ? (owner.nickname || owner.username) : '同学';
     return json(res, 200, { item: out, comments });
   }
   if (method === 'PATCH' && im) {
