@@ -612,7 +612,6 @@ $('authGo').onclick = async () => {
   } catch(e){ $('authErr').textContent = e.message; }
 };
 $('authPass').addEventListener('keydown', e => { if(e.key==='Enter') $('authGo').click(); });
-$('userBadge').onclick = () => showProfile();
 async function showProfile(){
   const me = await api('me');
   $('modalBody').innerHTML = `
