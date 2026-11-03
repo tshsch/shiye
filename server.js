@@ -74,6 +74,10 @@ try { db.exec("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''"); } catch (e) {
 try { db.exec("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ''"); } catch (e) {}
 try { db.exec("ALTER TABLE items ADD COLUMN agent_log TEXT DEFAULT ''"); } catch (e) {}
 db.exec('CREATE TABLE IF NOT EXISTS book_subs(user_id INTEGER NOT NULL, book_id INTEGER NOT NULL, PRIMARY KEY(user_id,book_id));');
+db.exec('CREATE TABLE IF NOT EXISTS item_opens(user_id INTEGER NOT NULL, item_id INTEGER NOT NULL, opened_at TEXT NOT NULL DEFAULT (datetime(\'now\',\'localtime\')));');
+db.exec('CREATE TABLE IF NOT EXISTS daily_pushes(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, date TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime(\'now\',\'localtime\')));');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_user_date ON daily_pushes(user_id, date);');
+try { db.exec("ALTER TABLE users ADD COLUMN daily_minutes INTEGER DEFAULT 10"); } catch (e) {}
 db.exec('CREATE INDEX IF NOT EXISTS idx_items_user ON items(user_id); CREATE INDEX IF NOT EXISTS idx_chunks_item ON chunks(item_id);');
 
 // ---------- books 全局共享：规范书名去重（同名书合并为一本） ----------
@@ -582,6 +586,132 @@ async function chatAgent(userId, q) {
   return { answer, sources, steps };
 }
 
+// ---------- 每日策展智能体：观察 -> 自主定策略 -> 生成阅读计划 ----------
+function getBacklog(userId) {
+  return db.prepare(`SELECT i.id, i.title, i.minutes, i.tags, i.book_id, i.created_at,
+    CAST(julianday('now','localtime') - julianday(i.created_at) AS INTEGER) AS age_days
+    FROM items i WHERE i.user_id=? AND NOT EXISTS(SELECT 1 FROM item_opens o WHERE o.item_id=i.id AND o.user_id=?)
+    ORDER BY i.created_at ASC LIMIT 20`).all(userId, userId);
+}
+
+const CURATOR_TOOLS = [
+  { type: 'function', function: { name: 'get_backlog', description: '查看用户积压未读的收藏（含积压天数、时长、标签、所属书）', parameters: { type: 'object', properties: {}, required: [] } } },
+  { type: 'function', function: { name: 'get_reading_stats', description: '查看用户最近14天实际读了什么（兴趣信号）', parameters: { type: 'object', properties: {}, required: [] } } },
+  { type: 'function', function: { name: 'get_book_progress', description: '查看书架上每本书的已读/未读进度', parameters: { type: 'object', properties: {}, required: [] } } },
+  { type: 'function', function: { name: 'get_yesterday_feedback', description: '查看昨天推送了什么、用户实际读了没有', parameters: { type: 'object', properties: {}, required: [] } } },
+  { type: 'function', function: { name: 'get_social', description: '查看广场上同学们最近在讨论什么', parameters: { type: 'object', properties: {}, required: [] } } },
+  { type: 'function', function: { name: 'submit_digest', description: '提交今日策展', parameters: { type: 'object', properties: {
+    theme: { type: 'string', description: '今天的策展主题，10字内' },
+    intro: { type: 'string', description: '两句话说明今天为什么这样安排' },
+    strategy: { type: 'string', description: '策略名：主题阅读/清理积压/跟进兴趣/跟随同学热门等' },
+    goal: { type: 'string', description: '一句今日目标' },
+    picks: { type: 'array', description: '今日推荐阅读 3-5 篇（item_id 必须来自 get_backlog）', items: { type: 'object', properties: { item_id: { type: 'integer' }, reason: { type: 'string' } }, required: ['item_id', 'reason'] } },
+    cleanups: { type: 'array', description: '建议删除的过期收藏 0-2 条', items: { type: 'object', properties: { item_id: { type: 'integer' }, reason: { type: 'string' } }, required: ['item_id', 'reason'] } }
+  }, required: ['theme', 'intro', 'goal', 'picks'] } } }
+];
+
+async function curatorAgent(userId, budget) {
+  let payload = null;
+  const execTool = async (name, args) => {
+    if (name === 'get_backlog') return { budget_minutes: budget, backlog: getBacklog(userId) };
+    if (name === 'get_reading_stats') {
+      const rows = db.prepare("SELECT i.id, i.title, i.tags, o.opened_at FROM item_opens o JOIN items i ON i.id=o.item_id WHERE o.user_id=? AND o.opened_at >= datetime('now','localtime','-14 day') ORDER BY o.opened_at DESC LIMIT 30").all(userId);
+      return { total: rows.length, recent_opens: rows };
+    }
+    if (name === 'get_book_progress') {
+      return db.prepare(`SELECT b.title, b.author,
+        (SELECT COUNT(*) FROM items i WHERE i.book_id=b.id AND i.user_id=?) AS total,
+        (SELECT COUNT(*) FROM items i WHERE i.book_id=b.id AND i.user_id=? AND NOT EXISTS(SELECT 1 FROM item_opens o WHERE o.item_id=i.id AND o.user_id=?)) AS unread
+        FROM books b WHERE b.user_id=? OR EXISTS(SELECT 1 FROM book_subs s WHERE s.book_id=b.id AND s.user_id=?)
+        OR EXISTS(SELECT 1 FROM items i2 WHERE i2.book_id=b.id AND i2.user_id=?)`).all(userId, userId, userId, userId, userId, userId);
+    }
+    if (name === 'get_yesterday_feedback') {
+      const yp = db.prepare("SELECT payload FROM daily_pushes WHERE user_id=? AND date=date('now','localtime','-1 day')").get(userId);
+      if (!yp) return { note: '昨天没有推送记录' };
+      try {
+        const p = JSON.parse(yp.payload);
+        return { theme: p.theme, picks: (p.picks || []).map(pk => ({ title: pk.title, opened: !!db.prepare('SELECT 1 FROM item_opens WHERE user_id=? AND item_id=?').get(userId, pk.item_id) })) };
+      } catch (e) { return { note: '记录损坏' }; }
+    }
+    if (name === 'get_social') {
+      return db.prepare(`SELECT i.id, i.title, i.one_sentence, (SELECT COUNT(*) FROM comments c WHERE c.item_id=i.id) AS comments
+        FROM items i LEFT JOIN folders f ON f.id=i.folder_id
+        WHERE f.is_public=1 AND i.created_at >= datetime('now','localtime','-7 day') ORDER BY i.id DESC LIMIT 6`).all();
+    }
+    if (name === 'submit_digest') {
+      const picks = [];
+      for (const pk of (Array.isArray(args.picks) ? args.picks : []).slice(0, 5)) {
+        const it = db.prepare('SELECT id, title, minutes FROM items WHERE id=? AND user_id=?').get(Number(pk.item_id), userId);
+        if (it) picks.push({ item_id: it.id, title: it.title, reason: String(pk.reason || '').slice(0, 80) });
+      }
+      if (!picks.length) return { error: 'picks 不能为空，且必须是用户自己的收藏' };
+      const cleanups = [];
+      for (const c of (Array.isArray(args.cleanups) ? args.cleanups : []).slice(0, 2)) {
+        const it = db.prepare('SELECT id, title FROM items WHERE id=? AND user_id=?').get(Number(c.item_id), userId);
+        if (it) cleanups.push({ item_id: it.id, title: it.title, reason: String(c.reason || '').slice(0, 80) });
+      }
+      payload = {
+        theme: String(args.theme || '今日策展').slice(0, 30),
+        intro: String(args.intro || '').slice(0, 200),
+        strategy: String(args.strategy || '').slice(0, 30),
+        goal: String(args.goal || '').slice(0, 60),
+        picks, cleanups, generated: 'agent'
+      };
+      return { ok: true };
+    }
+    return { error: '未知工具' };
+  };
+  const sys = '你是"拾页"的每日策展智能体，解决用户"收藏了不看"的问题。先用工具观察状态（积压、阅读历史、书架进度、昨日反馈、广场热门），再自主决定今天的策展策略，最后调用 submit_digest。规则：1) picks 挑 3-5 篇，总时长尽量贴近预算；2) 每篇 reason 一句话讲清"为什么今天读它"；3) 过期且不值得读的可以进 cleanups 劝退；4) 昨天推了没读的类型，今天换策略；5) 不要推荐用户最近已读过的内容。';
+  const msgs = [
+    { role: 'system', content: sys },
+    { role: 'user', content: '今天是 ' + new Date().toLocaleDateString('zh-CN') + '，用户每日阅读预算约 ' + budget + ' 分钟。请开始今日策展。' }
+  ];
+  for (let step = 0; step < 10; step++) {
+    let msg;
+    try { msg = await llmMsg(msgs, CURATOR_TOOLS); } catch (e) { break; }
+    if (!msg) break;
+    msgs.push(msg);
+    const calls = msg.tool_calls || [];
+    if (!calls.length) break;
+    let done = false;
+    for (const tc of calls) {
+      let args = {};
+      try { args = JSON.parse(tc.function.arguments || '{}'); } catch (e) {}
+      let result;
+      try { result = await execTool(tc.function.name, args); } catch (e) { result = { error: String(e.message || e) }; }
+      if (tc.function.name === 'submit_digest') done = !!payload;
+      msgs.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 4000) });
+    }
+    if (done) break;
+  }
+  return payload ? { payload } : null;
+}
+
+// 无 key / 智能体失败时的规则兜底：按陈旧度凑预算
+function dailyFallback(userId, budget) {
+  const backlog = getBacklog(userId);
+  const budgetMin = Number(budget) || 10;
+  const picks = []; let used = 0;
+  for (const b of backlog) {
+    const m = b.minutes || 3;
+    if (used + m > budgetMin) continue;
+    picks.push({ item_id: b.id, title: b.title, reason: '收藏 ' + Math.max(1, b.age_days) + ' 天未读' });
+    used += m;
+    if (picks.length >= 3) break;
+  }
+  if (!picks.length && backlog.length) picks.push({ item_id: backlog[0].id, title: backlog[0].title, reason: '积压最久的一篇，今天就从它开始' });
+  const cleanups = backlog.filter(b => b.age_days >= 30).slice(0, 2).map(b => ({ item_id: b.id, title: b.title, reason: '收藏 ' + b.age_days + ' 天从未打开，建议清理' }));
+  return { theme: '清理积压', intro: '今天先从积压最久的收藏开始，慢慢消化。', strategy: '按陈旧度排序', goal: '读完 ' + picks.length + ' 篇积压收藏', picks, cleanups, generated: 'fallback' };
+}
+
+async function generateDaily(userId) {
+  const budget = (db.prepare('SELECT daily_minutes FROM users WHERE id=?').get(userId) || {}).daily_minutes || 10;
+  if (LLM_KEY) {
+    try { const r = await curatorAgent(userId, budget); if (r && r.payload) return r.payload; } catch (e) {}
+  }
+  return dailyFallback(userId, budget);
+}
+
 function itemRow(r) { return { ...r, tags: JSON.parse(r.tags || '[]') }; }
 
 async function handleApi(req, res, pathname, query) {
@@ -624,8 +754,8 @@ async function handleApi(req, res, pathname, query) {
   const me = currentUser(req);
   if (!me) return json(res, 401, { error: '请先登录' });
   if (method === 'GET' && pathname === '/api/me') {
-    const u = db.prepare('SELECT username, nickname, bio, avatar FROM users WHERE id=?').get(me);
-    return json(res, 200, u ? { username: u.username, nickname: u.nickname || '', bio: u.bio || '', avatar: u.avatar || '' } : { username: '同学', nickname: '', bio: '', avatar: '' });
+    const u = db.prepare('SELECT username, nickname, bio, avatar, daily_minutes FROM users WHERE id=?').get(me);
+    return json(res, 200, u ? { username: u.username, nickname: u.nickname || '', bio: u.bio || '', avatar: u.avatar || '', daily_minutes: u.daily_minutes || 10 } : { username: '同学', nickname: '', bio: '', avatar: '', daily_minutes: 10 });
   }
 
   if (method === 'GET' && pathname === '/api/state') {
@@ -763,6 +893,7 @@ async function handleApi(req, res, pathname, query) {
       allowed = (f && f.is_public === 1) || (item.recommend_note && item.recommend_note !== '');
     }
     if (!allowed) return json(res, 403, { error: '该内容未公开，无法查看' });
+    db.prepare('INSERT INTO item_opens(user_id,item_id) VALUES(?,?)').run(me, item.id);
     const comments = commentsFor(item.id, me);
     const owner = db.prepare('SELECT username, nickname, avatar FROM users WHERE id=?').get(item.user_id);
     const out = itemRow(item); out.owner_name = owner ? owner.username : '同学';
@@ -811,7 +942,9 @@ async function handleApi(req, res, pathname, query) {
       if (a.length > 300000) return json(res, 400, { error: '头像图片太大，请换一张小图' });
       avatar = a;
     }
-    db.prepare('UPDATE users SET nickname=?, bio=?, avatar=? WHERE id=?').run(nickname, bio, avatar, me);
+    let dailyMinutes = u.daily_minutes || 10;
+    if ('daily_minutes' in b) dailyMinutes = Math.max(5, Math.min(60, Number(b.daily_minutes) || 10));
+    db.prepare('UPDATE users SET nickname=?, bio=?, avatar=?, daily_minutes=? WHERE id=?').run(nickname, bio, avatar, dailyMinutes, me);
     return json(res, 200, { ok: true });
   }
   if (method === 'GET' && pathname === '/api/fav-comments') {
@@ -831,6 +964,20 @@ async function handleApi(req, res, pathname, query) {
     else db.prepare('INSERT INTO ' + kind + ' (comment_id,user_id) VALUES(?,?)').run(cid, me);
     const cnt = db.prepare('SELECT COUNT(*) AS n FROM ' + kind + ' WHERE comment_id=?').get(cid).n;
     return json(res, 200, { active: !exists, count: cnt });
+  }
+
+  // 每日策展：GET 懒生成（一天一次），POST ?force=1 重新生成
+  if (pathname === '/api/daily' && (method === 'GET' || method === 'POST')) {
+    if (method === 'POST' && query.get('force') === '1') {
+      db.prepare("DELETE FROM daily_pushes WHERE user_id=? AND date=date('now','localtime')").run(me);
+    }
+    let row = db.prepare("SELECT payload FROM daily_pushes WHERE user_id=? AND date=date('now','localtime')").get(me);
+    if (!row) {
+      const payload = await generateDaily(me);
+      db.prepare("INSERT INTO daily_pushes(user_id,date,payload) VALUES(?,date('now','localtime'),?)").run(me, JSON.stringify(payload));
+      row = { payload: JSON.stringify(payload) };
+    }
+    return json(res, 200, { push: JSON.parse(row.payload) });
   }
 
   if (method === 'POST' && pathname === '/api/chat') {

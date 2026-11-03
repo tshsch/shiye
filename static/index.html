@@ -128,7 +128,8 @@ window.addEventListener('unhandledrejection', function(e){
   <div class="logo">拾<span>页</span></div>
   <div class="badge" id="aiBadge">检测中…</div>
   <nav>
-    <button data-tab="inbox" class="on">收藏夹</button>
+    <button data-tab="today" class="on">今日</button>
+    <button data-tab="inbox">收藏夹</button>
     <button data-tab="shelf">书架</button>
     <button data-tab="square">广场</button>
     <button data-tab="chat">问收藏</button>
@@ -150,7 +151,12 @@ window.addEventListener('unhandledrejection', function(e){
     <div class="note" id="saveNote"></div>
   </div>
 
-  <div id="tab-inbox">
+  <div id="tab-today">
+    <div class="section">今日策展</div>
+    <div id="todayBox"><div class="empty">生成中…</div></div>
+  </div>
+
+  <div id="tab-inbox" style="display:none">
     <div class="section">收藏夹</div>
     <input id="searchBox" placeholder="🔍 搜索标题 / 摘要 / 标签…" style="width:100%;border:1px solid var(--line);border-radius:99px;padding:9px 16px;font-size:13px;margin-bottom:10px;outline:none" oninput="renderItems()">
     <div class="folder-strip" id="folderStrip"></div>
@@ -249,8 +255,53 @@ async function refresh(){
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x=>x.classList.remove('on'));
   b.classList.add('on');
-  for (const t of ['inbox','shelf','square','chat','ext']) $('tab-'+t).style.display = b.dataset.tab===t ? '' : 'none';
+  for (const t of ['today','inbox','shelf','square','chat','ext']) $('tab-'+t).style.display = b.dataset.tab===t ? '' : 'none';
 });
+
+// ---------- 今日策展 ----------
+let DAILY = null;
+async function loadDaily(){
+  try {
+    const d = await api('daily');
+    DAILY = d.push; renderDaily();
+    const flag = 'shiy_daily_seen_' + (S.username||'') + '_' + new Date().toISOString().slice(0,10);
+    if (!localStorage.getItem(flag)) { toast('📮 今日策展已生成'); localStorage.setItem(flag,'1'); }
+  } catch(e){ $('todayBox').innerHTML = '<div class="empty">今日策展生成失败：' + esc(e.message||'') + '</div>'; }
+}
+function renderDaily(){
+  const box = $('todayBox');
+  if (!DAILY) { box.innerHTML = '<div class="empty">生成中…</div>'; return; }
+  const p = DAILY;
+  const pickCards = (p.picks||[]).map((pk,i)=>{
+    const it = S.items.find(x=>x.id===pk.item_id);
+    return `<div class="card" onclick="openItem(${pk.item_id})"><h3>${i+1}. ${esc(pk.title)}</h3><div class="one">${esc(pk.reason)}</div><div class="meta"><span>约 ${it?it.minutes:'?'} 分钟</span><span>点开即计入已读</span></div></div>`;
+  }).join('');
+  const cleanupCards = (p.cleanups||[]).map(c=>`
+    <div class="card" style="border-color:#fecaca"><h3>${esc(c.title)}</h3><div class="one">${esc(c.reason)}</div><div class="meta"><span style="color:#ef4444;cursor:pointer;font-weight:600" onclick="cleanupItem(${c.item_id})">🗑 删掉它</span><span style="cursor:pointer" onclick="toast('已保留，明天再见')">先留着</span></div></div>`).join('');
+  box.innerHTML = `
+    <div class="pastebox" style="margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <div><b style="font-size:16px">📌 ${esc(p.theme||'今日策展')}</b><span class="hint" style="margin-left:10px">${esc(p.goal||'')}</span></div>
+        <div class="row" style="margin:0"><select onchange="setBudget(this.value)">${[5,10,15,20,30].map(m=>`<option value="${m}" ${m===(ME&&ME.daily_minutes||10)?'selected':''}>每日 ${m} 分钟</option>`).join('')}</select><button class="btn small ghost" onclick="regenDaily()">🔄 重新策展</button></div>
+      </div>
+      <p style="font-size:14px;line-height:1.8;margin-top:8px">${esc(p.intro||'')}</p>
+      ${p.strategy?`<p class="hint" style="margin-top:6px">🤖 策略：${esc(p.strategy)}${p.generated==='fallback'?'（演示模式）':''}</p>`:''}
+    </div>
+    ${pickCards ? `<div class="grid" style="margin-top:6px">${pickCards}</div>` : '<div class="empty" style="padding:30px 0">收藏夹已经全读完了，去收几篇新的吧 🎉</div>'}
+    ${cleanupCards ? `<div class="section" style="font-size:14px">🧹 智能体建议清理</div><div class="grid">${cleanupCards}</div>` : ''}`;
+}
+async function regenDaily(){
+  try { const d = await api('daily?force=1','POST',{}); DAILY = d.push; renderDaily(); toast('已重新策展'); }
+  catch(e){ toast(e.message); }
+}
+async function setBudget(m){
+  try { await api('profile','PATCH',{ daily_minutes: Number(m) }); if (ME) { ME.daily_minutes = Number(m); } toast('已保存，下次策展按 ' + m + ' 分钟安排'); }
+  catch(e){ toast(e.message); }
+}
+async function cleanupItem(id){
+  try { await api('items/'+id,'DELETE'); await refresh(); await regenDaily(); toast('已删除'); }
+  catch(e){ toast(e.message); }
+}
 
 // ---------- save ----------
 async function saveItem(){
@@ -619,6 +670,7 @@ async function boot(){
     chatKey = 'shiy_chat_' + me.username;
     loadChatHistory();
     await refresh();
+    loadDaily();
   } catch(e){ showAuth(); }
 }
 $('authSwitch').onclick = () => {
