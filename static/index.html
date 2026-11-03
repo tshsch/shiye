@@ -106,6 +106,17 @@ sup.cite{color:var(--accent);cursor:pointer;font-weight:700;margin:0 2px}
 </style>
 </head>
 <body>
+<div id="jsErr" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:#b91c1c;color:#fff;padding:8px 14px;font-size:13px;"></div>
+<script>
+window.addEventListener('error', function(e){
+  var b = document.getElementById('jsErr');
+  if (b) { b.style.display = 'block'; b.textContent = '脚本错误: ' + (e.message || '未知') + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : ''); }
+});
+window.addEventListener('unhandledrejection', function(e){
+  var b = document.getElementById('jsErr');
+  if (b) { b.style.display = 'block'; b.textContent = '请求错误: ' + (e.reason && e.reason.message ? e.reason.message : e.reason); }
+});
+</script>
 <header>
   <div class="logo">拾<span>页</span></div>
   <div class="badge" id="aiBadge">检测中…</div>
